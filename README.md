@@ -46,7 +46,7 @@
 
 ##### |------|-------------|
 
-##### | 1. Data Cleaning \& Preparation.Rmd | Initial data cleaning — 2 stations |
+##### | 1. Data Cleaning \& Preparation.Rmd | Initial data cleaning - 2 stations |
 
 ##### | 2. Expanded Data Cleaning.Rmd | Full cleaning - 9 stations, 15 counties |
 
