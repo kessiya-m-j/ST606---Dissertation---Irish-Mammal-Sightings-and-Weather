@@ -76,9 +76,7 @@
 
 ### 
 
-##### **log(μ\_ts) = (β₀ + b₀s) + (β₁ + b₁s)·temp +**
-
-##### &#x20;           **(β₂ + b₂s)·temp² + β₃·rainfall + α\[month]**
+##### **log(μ\_ts) = (β₀ + b₀s) + (β₁ + b₁s)·temp +** **(β₂ + b₂s)·temp² + β₃·rainfall + α\[month]**
 
 ### 
 
@@ -108,7 +106,7 @@
 
 ###### 
 
-###### Supervisor: Dr Rafael De Andrade Moral  
+###### Supervisor: Dr Rafael De Andrade Moral
 
 ###### Maynooth University, 2026
 
