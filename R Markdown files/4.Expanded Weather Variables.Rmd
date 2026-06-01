@@ -1,0 +1,286 @@
+---
+title: "ST606 Project - Expanded Weather Variables"
+author: "Kessiya Mary Jose - 25250360"
+date: "`r format(Sys.time(), '%X %d %B, %Y')`"
+output: html_document
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE,
+                      cache.path = "cache/")
+library(tidyverse)
+library(lubridate) # helps with date convertion
+```
+
+
+#### Load and Clean rainfall (MTM05)
+```{r message=FALSE, warning=FALSE}
+rainfall_new <- read.csv("MTM05.20260404T020437.csv")
+
+names(rainfall_new)
+
+rainfall_clean2 <- rainfall_new %>%
+  dplyr::rename(
+    station  = `Meteorological.Weather.Station`,
+    rainfall = VALUE
+  ) %>%
+  dplyr::filter(!is.na(rainfall)) %>%
+  dplyr::mutate(
+    date  = parse_date_time(Month, orders = "Y B"),
+    year  = year(date),
+    month = month(date)
+  ) %>%
+  dplyr::filter(year >= 2016, year <= 2023) %>%
+  dplyr::select(station, year, month, rainfall_mm = rainfall)
+
+cat("Rainfall rows:", nrow(rainfall_clean2), "\n")
+cat("Stations:\n")
+print(unique(rainfall_clean2$station))
+```
+
+Note:
+
+1. MTM05 is the newer version of MTM01 and goes up to 2023. The column structure is different from MTM01 - no TLIST column instead the month is written as "2016 January" format. So I use parse_date_time from lubridate to convert it properly. 
+
+2. I only keep 2016 to 2023 to match the mammals data.
+
+
+#### Load and Clean temperature (MTM06)
+```{r message=FALSE, warning=FALSE}
+temp_new <- read.csv("MTM06.20260404T020445.csv")
+
+print(unique(temp_new$`Statistic Label`))
+
+temp_clean2 <- temp_new %>%
+  dplyr::rename(
+    station     = `Meteorological.Weather.Station`,
+    statistic   = `Statistic.Label`,
+    temperature = VALUE
+  ) %>%
+  dplyr::filter(
+    statistic %in% c("Mean Air Temperature",
+                     "Mean Maximum Temperature",
+                     "Mean Minimum Temperature"),
+    !is.na(temperature)
+  ) %>%  # keeping only the three most useful temperature measures
+  dplyr::mutate(
+    date  = parse_date_time(Month, orders = "Y B"),
+    year  = year(date),
+    month = month(date)
+  ) %>%
+  dplyr::filter(year >= 2016, year <= 2023) %>%
+  dplyr::select(station, year, month, statistic, temperature)
+
+temp_wide <- temp_clean2 %>%
+  tidyr::pivot_wider(
+    names_from  = statistic,
+    values_from = temperature
+  ) %>%
+  dplyr::rename(
+    mean_temp     = `Mean Air Temperature`,
+    max_temp      = `Mean Maximum Temperature`,
+    min_temp      = `Mean Minimum Temperature`
+  )
+
+cat("Temperature rows:", nrow(temp_wide), "\n")
+cat("Columns:", names(temp_wide), "\n")
+```
+
+Note: 
+
+1. This MTM06 file has 6 different temperature measures. I am keeping Mean Air Temperature, Mean Maximum Temperature and Mean Minimum Temperature.
+
+2. "temp_wide" is temperature reshaping, so each temperature type becomes its own column and this makes it easier to join with other data later. 
+
+
+#### Load and Clean sunshine (MTM07)
+```{r message=FALSE, warning=FALSE}
+sunshine_new <- read.csv("MTM07.20260404T020453.csv")
+
+sunshine_clean <- sunshine_new %>%
+  dplyr::rename(
+    station  = `Meteorological.Weather.Station`,
+    sunshine = VALUE
+  ) %>%
+  dplyr::filter(!is.na(sunshine)) %>%
+  dplyr::mutate(
+    date  = parse_date_time(Month, orders = "Y B"),
+    year  = year(date),
+    month = month(date)
+  ) %>%
+  dplyr::filter(year >= 2016, year <= 2023) %>%
+  dplyr::select(station, year, month, sunshine_hours = sunshine)
+
+cat("Sunshine rows:", nrow(sunshine_clean), "\n")
+```
+
+Note: Sunshine is measured in hours per month.
+
+
+#### Load and Clean wind speed (MTM08)
+```{r message=FALSE, warning=FALSE}
+wind_new <- read.csv("MTM08.20260404T020401.csv")
+
+wind_clean <- wind_new %>%
+  dplyr::rename(
+    station    = `Meteorological.Weather.Station`,
+    wind_speed = VALUE
+  ) %>%
+  dplyr::filter(!is.na(wind_speed)) %>%
+  dplyr::mutate(
+    date  = parse_date_time(Month, orders = "Y B"),
+    year  = year(date),
+    month = month(date)
+  ) %>%
+  dplyr::filter(year >= 2016, year <= 2023) %>%
+  dplyr::select(station, year, month, wind_speed_knots = wind_speed)
+
+cat("Wind speed rows:", nrow(wind_clean), "\n")
+```
+
+Note: Wind speed is measured in knots.
+
+
+#### Fix station names 
+```{r message=FALSE, warning=FALSE}
+cat("Stations in new rainfall file:\n")
+print(sort(unique(rainfall_clean2$station)))
+
+rainfall_clean2 <- rainfall_clean2 %>%
+  dplyr::mutate(station = tolower(station))
+
+temp_wide <- temp_wide %>%
+  dplyr::mutate(station = tolower(station))
+
+sunshine_clean <- sunshine_clean %>%
+  dplyr::mutate(station = tolower(station))
+
+wind_clean <- wind_clean %>%
+  dplyr::mutate(station = tolower(station))
+
+cat("Stations after fixing:\n")
+print(sort(unique(rainfall_clean2$station)))
+```
+
+Note: Here there are station names mismatch between the old and new files. Example: "Cork airport" in old files and "Cork Airport" in new files. I converted the new files to match the older data's.
+
+
+#### Merging all weather variables
+```{r message=FALSE, warning=FALSE}
+weather_expanded <- rainfall_clean2 %>%
+  dplyr::left_join(temp_wide,      by = c("station", "year", "month")) %>%
+  dplyr::left_join(sunshine_clean, by = c("station", "year", "month")) %>%
+  dplyr::left_join(wind_clean,     by = c("station", "year", "month"))
+
+cat("Expanded weather rows:", nrow(weather_expanded), "\n")
+cat("Columns:", names(weather_expanded), "\n")
+
+cat("Missing values per column:\n")
+print(colSums(is.na(weather_expanded)))
+write_csv(weather_expanded, "weather_expanded_2016_2023.csv")
+```
+
+Note : 
+
+1. for merging all weather variables, i am using rainfall as the base and adding temperature, sunshine and wind speed to it using left join. The matching keys are station, year and month. 
+
+2. If there is no matching variable in any of the weather variable, these missing values will become NA.
+
+
+Interpretation:
+
+1. "weather_expanded_2016_2023.csv" has 2,108 rows with 9 columns - rainfall, max temp, min temp, mean temp, sunshine and wind all in one file.
+
+2. rainfall and max, min, & mean temp has 0 missing values.
+
+3. sunshine has 1,318 missing values and wind speed has 157 missing values.
+
+
+#### Merging with Mammals data
+```{r message=FALSE, warning=FALSE}
+mammals_clean <- read.delim("MammalsOfIreland2016-2025.txt", sep = "\t", stringsAsFactors = FALSE) %>%
+  dplyr::mutate(
+    date  = dmy(Date),
+    year  = year(date),
+    month = month(date)
+  ) %>%
+  dplyr::filter(
+    year >= 2016,
+    year <= 2023,
+    tolower(as.character(ZeroAbundance)) != "true",
+    !is.na(County),
+    !is.na(TaxonName)
+  ) %>%
+  dplyr::rename(species = TaxonName, county = County) %>%
+  dplyr::group_by(year, month, county, species) %>%
+  dplyr::summarise(
+    total_sightings = n(),
+    total_abundance = sum(as.numeric(Abundance), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+county_station_map <- tribble(
+  ~county,      ~station,
+  "Cork",       "cork airport",
+  "Dublin",     "dublin airport",
+  "Kildare",    "dublin airport",
+  "Galway",     "galway",
+  "Roscommon",  "galway",
+  "Kerry",      "valentia observatory",
+  "Wexford",    "rosslare",
+  "Clare",      "shannon airport",
+  "Limerick",   "shannon airport",
+  "Mayo",       "claremorris",
+  "Wicklow",    "casement",
+  "Carlow",     "casement",
+  "Kilkenny",   "kilkenny",
+  "Laois",      "kilkenny",
+  "Tipperary",  "kilkenny",
+  "Offaly",     "birr",
+  "Westmeath",  "mullingar",
+  "Louth",      "dublin airport",
+  "Meath",      "dublin airport",
+  "Monaghan",   "clones",
+  "Donegal",    "malin head",
+  "Sligo",      "belmullet",
+  "Leitrim",    "belmullet",
+  "Cavan",      "clones"
+) # all station names are in lowercase to match the new weather files
+
+final_dataset_expanded2 <- mammals_clean %>%
+  dplyr::left_join(county_station_map, by = "county") %>%
+  dplyr::left_join(weather_expanded,   by = c("station", "year", "month")) %>%
+  dplyr::filter(
+    !is.na(rainfall_mm),
+    !is.na(mean_temp)
+  )
+
+cat("Final expanded dataset rows:", nrow(final_dataset_expanded2), "\n")
+cat("Stations covered:", length(unique(final_dataset_expanded2$station)), "\n")
+cat("Counties covered:", length(unique(final_dataset_expanded2$county)), "\n")
+cat("Species included:", length(unique(final_dataset_expanded2$species)), "\n")
+cat("Columns:\n")
+print(names(final_dataset_expanded2))
+
+write_csv(final_dataset_expanded2, "final_dataset_expanded2.csv")
+```
+
+Note:
+
+1. I am loading the raw mammals data again and cleaning it the same way as in the expanded data cleaning script then joining it with the new expanded weather data which now has rainfall, temperature, sunshine and wind speed.
+
+2. I had to reload and re-clean the mammals data here because mammals_clean from the previous script is not available in this new Rmd file.
+
+3. Joining mammals with station map then with expanded weather filtering out rows where rainfall or temperature is missing. This removes Northern Ireland counties and any unmatched counties. 
+
+
+Interpretation:
+
+1. 7,496 rows 
+
+2. 9 stations, 15 counties, 26 species 
+
+3. 13 columns
+

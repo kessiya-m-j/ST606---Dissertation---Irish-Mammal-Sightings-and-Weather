@@ -1,0 +1,337 @@
+---
+title: "ST606 Project - 6. Combined Model Results"
+author: "Kessiya Mary Jose - 25250360"
+date: "`r format(Sys.time(), '%X %d %B, %Y')`"
+output: html_document
+---
+
+#### Setup
+```{r setup, message=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE,
+                      cache.path = "cache/")
+library(tidyverse)
+library(rjags)
+library(coda)
+library(parallel)
+library(knitr)
+
+options(mc.cores = 6)
+```
+
+
+#### Loading datasets
+```{r message=FALSE, warning=FALSE}
+# Loading the final dataset
+final_data <- read_csv("final_dataset_expanded2.csv",
+                       show_col_types = FALSE) %>%
+  dplyr::mutate(
+    date            = as.Date(paste(year, month, "01", sep = "-")),
+    temp_scaled     = as.numeric(scale(mean_temp)),
+    rainfall_scaled = as.numeric(scale(rainfall_mm)),
+    site            = as.integer(factor(station))
+  )
+
+# Creating the three species datasets
+fox_data <- final_data %>%
+  dplyr::filter(species == "Vulpes vulpes",
+                total_sightings >= 1)
+
+hare_data <- final_data %>%
+  dplyr::filter(species == "Lepus timidus subsp. hibernicus",
+                total_sightings >= 1)
+
+marten_data <- final_data %>%
+  dplyr::filter(species == "Martes martes",
+                total_sightings >= 1)
+
+cat("Fox rows:", nrow(fox_data), "\n")
+cat("Hare rows:", nrow(hare_data), "\n")
+cat("Marten rows:", nrow(marten_data), "\n")
+```
+
+
+#### JAGS combined model code
+```{r message=FALSE, warning=FALSE}
+# This is the combined model that includes all three predictors together:
+# 1. Temperature (quadratic with random slopes per site)
+# 2. Rainfall (fixed effect)
+# 3. Seasonal effects (monthly fixed effects, January as baseline)
+
+jags_combined_code <- "
+model {
+  for (i in 1:N) {
+    y[i] ~ dpois(mu[i]) T(1,)
+    log(mu[i]) <- (beta0 + b0[site[i]]) +
+                  (beta1 + b1[site[i]]) * temp[i] +
+                  (beta2 + b2[site[i]]) * temp[i]^2 +
+                  beta3 * rainfall[i] +
+                  alpha[month[i]]
+  }
+
+  for (s in 1:S) {
+    b0[s] ~ dnorm(0, tau0)
+    b1[s] ~ dnorm(0, tau1)
+    b2[s] ~ dnorm(0, tau2)
+  }
+
+  alpha[1] <- 0
+  for (m in 2:12) {
+    alpha[m] ~ dnorm(0, 0.001)
+  }
+
+  beta0 ~ dnorm(0, 0.001)
+  beta1 ~ dnorm(0, 0.001)
+  beta2 ~ dnorm(0, 0.001)
+  beta3 ~ dnorm(0, 0.001)
+
+  tau0 ~ dgamma(0.1, 0.1)
+  tau1 ~ dgamma(0.1, 0.1)
+  tau2 ~ dgamma(0.1, 0.1)
+
+  sigma0 <- 1 / sqrt(tau0)
+  sigma1 <- 1 / sqrt(tau1)
+  sigma2 <- 1 / sqrt(tau2)
+}
+"
+
+writeLines(jags_combined_code, "jags_model_combined.txt")
+cat("Combined model code saved to jags_model_combined.txt\n")
+```
+
+
+#### Fit combined model - fox
+```{r message=FALSE, warning=FALSE}
+# Fitting the combined model for fox
+# Including temperature, rainfall and seasonal effects together
+
+fox_combined_data <- list(
+  y        = fox_data$total_sightings,
+  temp     = fox_data$temp_scaled,
+  rainfall = fox_data$rainfall_scaled,
+  month    = fox_data$month,
+  site     = fox_data$site,
+  N        = nrow(fox_data),
+  S        = max(fox_data$site)
+)
+
+inits_combined <- list(
+  beta0 = 0, beta1 = 0,
+  beta2 = 0, beta3 = 0,
+  tau0  = 1, tau1  = 1, tau2 = 1
+)
+
+set.seed(123)
+
+fox_combined_model <- jags.model(
+  file     = "jags_model_combined.txt",
+  data     = fox_combined_data,
+  inits    = inits_combined,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+update(fox_combined_model, n.iter = 5000)
+
+fox_combined_samples <- coda.samples(
+  model          = fox_combined_model,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "alpha", "sigma0", "sigma1", "sigma2"),
+  n.iter         = 10000,
+  thin           = 2
+)
+
+cat("Fox combined model complete!\n")
+cat("\nConvergence check:\n")
+print(gelman.diag(fox_combined_samples[, c("beta0", "beta1",
+                                            "beta2", "beta3",
+                                            "sigma0", "sigma1",
+                                            "sigma2")]))
+```
+
+
+#### Fit combined model - hare
+```{r message=FALSE, warning=FALSE}
+# Fitting the combined model for hare
+
+hare_combined_data <- list(
+  y        = hare_data$total_sightings,
+  temp     = hare_data$temp_scaled,
+  rainfall = hare_data$rainfall_scaled,
+  month    = hare_data$month,
+  site     = hare_data$site,
+  N        = nrow(hare_data),
+  S        = max(hare_data$site)
+)
+
+set.seed(123)
+
+hare_combined_model <- jags.model(
+  file     = "jags_model_combined.txt",
+  data     = hare_combined_data,
+  inits    = inits_combined,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+update(hare_combined_model, n.iter = 8000)
+
+hare_combined_samples <- coda.samples(
+  model          = hare_combined_model,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "alpha", "sigma0", "sigma1", "sigma2"),
+  n.iter         = 15000,
+  thin           = 2
+)
+
+cat("Hare combined model complete!\n")
+cat("\nConvergence check:\n")
+print(gelman.diag(hare_combined_samples[, c("beta0", "beta1",
+                                             "beta2", "beta3",
+                                             "sigma0", "sigma1",
+                                             "sigma2")]))
+```
+
+
+#### Fit combined model - pine marten
+```{r message=FALSE, warning=FALSE}
+# Fitting the combined model for pine marten
+
+marten_combined_data <- list(
+  y        = marten_data$total_sightings,
+  temp     = marten_data$temp_scaled,
+  rainfall = marten_data$rainfall_scaled,
+  month    = marten_data$month,
+  site     = marten_data$site,
+  N        = nrow(marten_data),
+  S        = max(marten_data$site)
+)
+
+set.seed(123)
+
+marten_combined_model <- jags.model(
+  file     = "jags_model_combined.txt",
+  data     = marten_combined_data,
+  inits    = inits_combined,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+update(marten_combined_model, n.iter = 5000)
+
+marten_combined_samples <- coda.samples(
+  model          = marten_combined_model,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "alpha", "sigma0", "sigma1", "sigma2"),
+  n.iter         = 10000,
+  thin           = 2
+)
+
+cat("Pine marten combined model complete!\n")
+cat("\nConvergence check:\n")
+print(gelman.diag(marten_combined_samples[, c("beta0", "beta1",
+                                               "beta2", "beta3",
+                                               "sigma0", "sigma1",
+                                               "sigma2")]))
+```
+
+
+#### Extract combined model results
+```{r message=FALSE, warning=FALSE}
+# Extracting results from all three combined models
+# Creating clean data frames with posterior means, credible intervals and R-hat
+
+# Function to extract results neatly
+extract_results <- function(samples, species_name) {
+  s <- summary(samples)
+  rhat <- gelman.diag(samples[, c("beta0", "beta1", "beta2", "beta3",
+                                   "sigma0", "sigma1", "sigma2")])
+
+  # Main parameters only (not alpha)
+  params <- c("beta0", "beta1", "beta2", "beta3",
+              "sigma0", "sigma1", "sigma2")
+
+  data.frame(
+    species       = species_name,
+    parameter     = params,
+    posterior_mean = round(s$statistics[params, "Mean"], 4),
+    sd            = round(s$statistics[params, "SD"], 4),
+    lower_95      = round(s$quantiles[params, "2.5%"], 4),
+    upper_95      = round(s$quantiles[params, "97.5%"], 4),
+    rhat          = round(rhat$psrf[params, "Point est."], 3)
+  )
+}
+
+fox_combined_results    <- extract_results(fox_combined_samples,
+                                           "Vulpes vulpes (Fox)")
+hare_combined_results   <- extract_results(hare_combined_samples,
+                                           "Lepus timidus (Hare)")
+marten_combined_results <- extract_results(marten_combined_samples,
+                                           "Martes martes (Pine marten)")
+
+# Combining all three into one table
+all_combined_results <- dplyr::bind_rows(
+  fox_combined_results,
+  hare_combined_results,
+  marten_combined_results
+)
+
+cat("Combined model coefficient table:\n")
+print(all_combined_results)
+
+write_csv(all_combined_results, "combined_model_coefficients.csv")
+cat("\nSaved: combined_model_coefficients.csv\n")
+```
+
+
+#### Coefficient table - all species combined
+```{r message=FALSE, warning=FALSE}
+# Combining all three species results into one clean table
+all_combined_results <- dplyr::bind_rows(
+  fox_combined_results,
+  hare_combined_results,
+  marten_combined_results
+) %>%
+  # removing the ugly row index from parameter column
+  dplyr::mutate(parameter = gsub("\\.\\.\\..*", "", parameter))
+
+write_csv(all_combined_results, "combined_model_coefficients.csv")
+cat("Saved: combined_model_coefficients.csv\n")
+```
+
+
+#### Dissertation coefficient table
+```{r message=FALSE, warning=FALSE}
+library(knitr)
+
+param_labels <- c(
+  "beta0"  = "Intercept (β₀)",
+  "beta1"  = "Temperature linear (β₁)",
+  "beta2"  = "Temperature quadratic (β₂)",
+  "beta3"  = "Rainfall (β₃)",
+  "sigma0" = "SD random intercept (σ₀)",
+  "sigma1" = "SD random temp slope (σ₁)",
+  "sigma2" = "SD random quad slope (σ₂)"
+)
+
+dissertation_table <- all_combined_results %>%
+  dplyr::mutate(
+    Parameter = param_labels[parameter],
+    CI_95     = paste0("(", lower_95, ", ", upper_95, ")")
+  ) %>%
+  dplyr::select(
+    Species       = species,
+    Parameter,
+    `Post. Mean`  = posterior_mean,
+    `95% CI`      = CI_95,
+    `R-hat`       = rhat
+  )
+
+write_csv(dissertation_table, "dissertation_coefficient_table.csv")
+
+# To displaynice formatted table in the knitted HTML
+kable(dissertation_table,
+      caption = "Table 1: Combined model coefficient estimates - posterior means, 95% credible intervals and R-hat convergence diagnostics",
+      align   = c("l", "l", "r", "r", "r"),
+      row.names = FALSE)
+```
+

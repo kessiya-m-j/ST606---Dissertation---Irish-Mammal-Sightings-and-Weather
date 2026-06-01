@@ -1,0 +1,359 @@
+---
+title: "EDA Plots"
+author: "Kessiya Mary Jose - 25250360"
+date: "`r format(Sys.time(), '%X %d %B, %Y')`"
+output: html_document
+---
+
+## Goal: Exploratory Data Analysis (EDA)
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE,
+                      cache.path = "cache/")
+```
+
+```{r include=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(scales) # helps with formatting axes nicely
+```
+
+
+#### Load the dataset
+```{r message=FALSE, warning=FALSE}
+final_dataset <- read.csv("final_dataset_expanded.csv")
+```
+
+
+#### Create a proper date column
+```{r}
+final_dataset <- final_dataset %>%
+  dplyr::mutate(date = as.Date(paste(year, month, "01", sep = "-"))) # Creating a proper date column, which help x-axis shows as a timeline
+
+cat("Dataset loaded. Rows:", nrow(final_dataset), "\n")
+```
+
+
+#### Top 10 most sighted species
+```{r warning=FALSE, message=FALSE}
+top_species <- final_dataset %>%
+  dplyr::group_by(species) %>%
+  dplyr::summarise(total = sum(total_sightings), .groups = "drop") %>%
+  dplyr::slice_max(total, n = 10) %>%
+  dplyr::pull(species)
+
+cat("Top 10 species:\n")
+print(top_species)
+```
+
+Note: There is a total of 26 species in the dataset, but only choose top 10, or else the plot be too crowded.
+
+
+#### Plot 1: Total sightings over time
+```{r message=FALSE, warning=FALSE}
+final_dataset %>%
+  dplyr::group_by(date) %>% # grouped by date so all species and counties are added together
+  dplyr::summarise(total = sum(total_sightings), .groups = "drop") %>% # total number of sightings per month
+  
+  ggplot(aes(x = date, y = total)) +
+  geom_line(colour = "#2196F3", linewidth = 0.8) +
+  geom_point(colour = "#2196F3", size = 1.5) +
+  labs(
+    title = "Total mammal sightings across Ireland over time",
+    subtitle = "All species and counties combined, 2016-2023",
+    x = "Month",
+    y = "Number of sightings"
+  ) +
+  theme_minimal()
+
+ggsave("plot_1_total_sightings_over_time.png", width = 10, height = 5)
+```
+Interpretation: There is a big drop to near zero around 2019, which is suspicious. It might be fewer people/ observers who submitted the observations/records to the Biodiversity Ireland during that period. 
+
+
+#### Plot 2: Sightings by species over time
+```{r message=FALSE, warning=FALSE}
+final_dataset %>%
+  dplyr::filter(species %in% top_species) %>%
+  dplyr::group_by(date, species) %>%
+  dplyr::summarise(total = sum(total_sightings), .groups = "drop") %>%
+  ggplot(aes(x = date, y = total, colour = species)) +
+  geom_line(linewidth = 0.6) +
+  facet_wrap(~species, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Monthly sightings by species over time",
+    x = "Month",
+    y = "Total sightings"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+ggsave("plot_2_sightings_by_species.png", width = 14, height = 10)
+```
+Note: 
+
+1. I used "facet_wrap" to create a separate panel for each species.
+
+2. scales = "free_y" means each panel has its own y axis scale. I needed this because some species like Lepus timidus have hundreds of sightings while others like Mustela erminea have only a few if I used the same y axis for all, the smaller species would look flat.
+
+3. ncol = 2 means two columns of panels side by side.
+
+4. The same 2019 drop also happens here in every species panel, which confirms the data recording issue.
+
+5. In 2022-2023 Sciurus carolinensis has a huge spike of sightings which might be from a survey campaign.
+
+
+#### Plot 3: Seasonal pattern
+```{r message=FALSE, warning=FALSE}
+final_dataset %>%
+  dplyr::filter(species %in% top_species) %>%
+  dplyr::group_by(month, species) %>% # grouped by month and species
+  dplyr::summarise(avg = mean(total_sightings), .groups = "drop") %>% # calculating mean sightings, so each point represents average 2016-2023 for that month
+  
+  ggplot(aes(x = month, y = avg, colour = species, group = species)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  labs(
+    title = "Average sightings by month - seasonal pattern",
+    subtitle = "Top 10 species, averaged across all years and counties",
+    x = "Month",
+    y = "Average sightings"
+  ) +
+  theme_minimal(base_size = 14)
+
+ggsave("plot_3_seasonal_pattern.png", width = 14, height = 10)
+```
+
+NOte:
+
+1. I used "scale_x_continuous" to show month names like Jan, Feb, Mar instead of the numbers 1 to 12
+
+2. "month.abb" is a built-in R vector that contains the short month names
+
+
+Interpretation: 
+
+1. Sciurus carolinensis (grey squirrel) has a very sharp peak in July
+
+2. Lutra lutra (otter) peaks in March
+
+3. Lepus timidus (Irish hare) peaks in spring around March-April
+
+4. Most other species are relatively flat across the year
+
+
+#### Plot 4: Sightings vs rainfall (scatter, by species)
+### This is one of the key plots of my research question - Whether high rainfalls means fewer or lesser animal sightings?
+```{r message=FALSE, warning=FALSE}
+final_dataset %>%
+  dplyr::filter(species %in% top_species) %>%
+  ggplot(aes(x = rainfall_mm, y = total_sightings)) +
+  geom_point(alpha = 0.3, colour = "#2196F3", size = 1) +
+  geom_smooth(method = "loess", colour = "#E53935", se = TRUE) +
+  facet_wrap(~species, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Sightings vs monthly rainfall by species",
+    x = "Monthly rainfall (mm)",
+    y = "Number of sightings"
+  ) +
+  theme_minimal()
+
+ggsave("plot_4_sightings_vs_rainfall.png", width = 14, height = 10)
+```
+
+Note: 
+
+1. "alpha = 0.3" makes the points slightly transparent, which i used because many points overlaps at low sighting values and it helps me to show how many points are stacked on top of each other. 
+
+2. "geom_smooth" with "method = "loess" " draws a smooth curved trend line(red line).
+
+3. "se = TRUE"  adds the grey confidence band around the line to show the uncertain trend estimate.
+
+
+Interpretation:
+
+1. Each blue dot represents one month in one county for one species.
+
+2. Most species have a fairly flat red line (smooth trend) across rainfall values which suggests rainfall on its own may not be a strong predictor.
+
+3. Some species like Lepus timidus show a slight decline with high rainfall. (In my opinion, it makes sense - because people are less likely to go out recording on very wet days even if the animals are still active).
+
+4. The confidence bands (grey shaded area) get very wide at high rainfall values because there are fewer months with very high rainfall. 
+
+
+#### Plot 5: Sightings vs temperature
+### This is another key plots of my research question - Whether high temperature means fewer or lesser animal sightings?
+```{r message=FALSE, warning=FALSE}
+final_dataset %>%
+  dplyr::filter(species %in% top_species) %>%
+  ggplot(aes(x = mean_temp_celsius, y = total_sightings)) +
+  geom_point(alpha = 0.3, colour = "#43A047", size = 1) +
+  geom_smooth(method = "loess", colour = "#E53935", se = TRUE) +
+  facet_wrap(~species, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Sightings vs monthly mean temperature by species",
+    x = "Mean temperature (°C)",
+    y = "Number of sightings"
+  ) +
+  theme_minimal()
+
+ggsave("plot_5_sightings_vs_temperature.png", width = 14, height = 10)
+```
+
+Interpretation:
+
+1. Each green dot represents one month in one county for one species
+
+2. Red line shows the smooth trend
+
+3. Grey band shows the confidence interval around the trend
+
+4. Temperature seems to show slightly clearer trends than rainfall.
+
+5. Sciurus carolinensis shows an increasing trend with temperature which matches the July peak we saw in Plot 3 where warmer months have more grey squirrel sightings.
+
+6. Oryctolagus cuniculus (rabbit) also shows a slight increase with temperature which makes sense as rabbits are more active in warmer weather. 
+
+7. Most other species have fairly flat trends suggesting temperature alone is not the strong factor for every species.
+
+8. The confidence bands are wider for species with fewer records like Mustela erminea, which shows that we must not be confident about the trend for those species.
+
+
+#### Plot 6: Sightings by station
+### This is one of the key plots of my research question - Which counties/regions have most sightings?
+```{r message=FALSE, warning=FALSE}
+final_dataset %>%
+  dplyr::group_by(station) %>%
+  dplyr::summarise(total = sum(total_sightings), .groups = "drop") %>%
+  ggplot(aes(x = reorder(station, total), y = total)) +
+  geom_col(fill = "#5C6BC0") +
+  coord_flip() +
+  labs(
+    title = "Total mammal sightings by weather station zone",
+    subtitle = "Each station represents the counties in its region",
+    x = "Station / Region",
+    y = "Total sightings"
+  ) +
+  theme_minimal()
+
+ggsave("plot_6_sightings_by_station.png", width = 12, height = 6)
+```
+
+Note: 
+
+1. I used "geom_col" instead of "geom_bar" because I already have the total calculated. (geom_col uses a value from the data while geom_bar counts rows automatically).
+
+2. "reorder(station, total)" sorts the bars from smallest to largest, so longest bar on top.
+
+3. "coord_flip()" rotates the whole plot so station names are on the y axis. (I used this because, the station names are long and it overlaps if it is written in x axis).
+
+
+Interpretation:
+
+1. Dublin airport zone has  the most sightings with over 6000. (This is likely because Dublin and surrounding counties have more people actively recording wildlife on Biodiversity Ireland).
+
+2. Cork airport zone is second with around 4500 sightings. 
+
+3. Mullingar zone has the fewest (which makes sense as Westmeath is a less populated inland county).
+
+4. This uneven distribution is a limitatio  of citizen science data.
+
+
+#### Plot 7: Top 5 species across top 4 stations
+### Visualising sightings stratified by both species and station location.
+```{r warning=FALSE, message=FALSE}
+top4_stations <- c("Dublin airport", "Cork airport",
+                   "Valentia Observatory", "Shannon airport")
+top5_species  <- top_species[1:5]
+
+final_dataset %>%
+  dplyr::filter(
+    species %in% top5_species,
+    station %in% top4_stations
+  ) %>%
+  dplyr::group_by(date, species, station) %>%
+  dplyr::summarise(total = sum(total_sightings), .groups = "drop") %>%
+  ggplot(aes(x = date, y = total, colour = species)) +
+  geom_line(linewidth = 0.6) +
+  facet_grid(station ~ species, scales = "free_y") +
+  labs(
+    title = "Sightings over time - by species and station",
+    x = "Month",
+    y = "Sightings"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+ggsave("plot_7_sightings_overtime.png", width = 10, height = 6)
+```
+
+Note: 
+
+1. "facet_grid(station ~ species)" makes a proper grid where rows = stations and columns = species. This makes it easier to compare the same apecies across different stations by reading across a row or the same station across species by reading down. 
+
+2. I rotated the x axis labels by 45 degrees with "angle = 45" because the year labels overlap when horizontal. 
+
+3. I only choose top 5 species and top 4 stations, because all species ans stations will make the plot crowded. 
+
+4. I chose the top 4 stations because they have the most data: Dublin airport, Cork airport, Valentia Observatory, Shannon airport. These stations covers different parts of Ireland - east, south, west and midwest.
+
+
+Interpretation:
+
+1. Lepus timidus is consistently recorded across all 4 stations.
+
+2. Lutra lutra has a big spike in Cork airport zone around 2017-2018. 
+
+3. Martes martes spikes dramatically in Dublin in 2020-2021.
+
+4. Sciurus vulgaris almost disappears after 2019 in Dublin and Shannon but continues in Cork and Valentia. 
+
+5. Vulpes vulpes shows a dip during the 2019 gap period across all stations but recovers noticeably in Dublin from 2020 onwards.
+
+
+#### Plot 8: Temperature vs sightings by station for top 3 species
+```{r message=FALSE, warning=FALSE}
+top3_species <- top_species[1:3]
+
+final_dataset %>%
+  dplyr::filter(species %in% top3_species) %>%
+  ggplot(aes(x = mean_temp_celsius, y = total_sightings, colour = station)) +
+  geom_point(alpha = 0.4, size = 1.5) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 0.8) +
+  facet_wrap(~species, scales = "free_y", ncol = 3) +
+  labs(
+    title = "Sightings vs temperature - top 3 species by station",
+    x = "Mean temperature (°C)",
+    y = "Number of sightings",
+    colour = "Station"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+ggsave("plot_8_sightings_vs_temperature.png", width = 10, height = 6)
+```
+
+Note:
+
+1. This graph is different from plot 5 (temperature vs sightings) because instead of single average trend, here ia am using separate trend lines for each 9 stations. So we can see if different regions of Ireland respond differently to temperature for the same species.
+
+2. "se = FALSE" is used here to remove the confidence bands, since having each station having their own will overlap and unreadable.
+
+3. The legend is kept at the bottom because the colour of each line tells you which station it belongs to.
+
+4. I selected only the top 3 species here because with 3 panels side by side using "ncol = 3".
+
+Interpretation:
+
+1. Lepus timidus (Irish hare):
+Most stations show relatively flat trends with temperature. Valentia Observatory (pink) shows a peak around 8-10 degrees then declines at higher temperatures. Claremorris (yellow-green) also peaks early and then flattens. 
+
+2. Martes martes (pine marten):
+Most stations are fairly flat and close together. Shannon airport (purple) shows an increase at higher temperatures. Dublin airport (teal) stays relatively flat throughout.
+
+3. Vulpes vulpes (fox):
+Cork airport (dark green) shows a very strong increase with temperature compared to all other stations. This is the most striking station difference in the whole plot. It might suggest that foxes in the Cork region are more active or more frequently recorded in warmer months. (This station-level difference suggests a possible temperature × location interaction effect).

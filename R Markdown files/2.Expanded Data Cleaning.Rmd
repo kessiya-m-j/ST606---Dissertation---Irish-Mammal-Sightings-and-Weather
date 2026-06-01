@@ -1,0 +1,194 @@
+---
+title: "ST606 Project - Expanded Data Cleaning"
+author: "Kessiya Mary Jose - 25250360"
+date: "`r format(Sys.time(), '%X %d %B, %Y')`"
+output: html_document
+---
+
+## Goal: Create one master dataset using all counties and all available weather stations across Ireland
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE,
+                      cache.path = "cache/")
+```
+
+```{r include=FALSE}
+library(tidyverse)
+library(lubridate) # helps with date convertion
+```
+
+#### Load and clean the Rainfall - weather data
+```{r message=FALSE, warning=FALSE}
+rainfall_raw <- read.csv("MTM01.20260317141732.csv")
+
+rainfall_clean <- rainfall_raw %>%
+  dplyr::rename(
+    month_code = `TLIST.M1.`,
+    station    = `Meteorological.Weather.Station`,
+    rainfall   = VALUE
+  ) %>%
+  dplyr::filter(!is.na(rainfall)) %>% # removing rows where rainfall value is missing
+  dplyr::mutate(
+    year  = as.integer(substr(month_code, 1, 4)),
+    month = as.integer(substr(month_code, 5, 6))
+  ) %>% # extracting year and month
+  dplyr::filter(year >= 2016, year <= 2023) %>% # keeping only 2016-2023 to match with mammals data
+  dplyr::select(station, year, month, rainfall_mm = rainfall) # keeping only the columns i need
+
+cat("Rainfall data rows:", nrow(rainfall_clean), "\n")
+cat("Stations in rainfall data:\n")
+print(unique(rainfall_clean$station))
+```
+
+#### Load and clean the Temperature - weather data
+```{r message=FALSE, warning=FALSE}
+temp_raw <- read.csv("MTM02.20260317141807.csv")
+
+temp_clean <- temp_raw %>%
+  dplyr::filter(`Statistic.Label` == "Mean Temperature") %>% # keeping only mean temperature
+  dplyr::rename(
+    month_code  = `TLIST.M1.`,
+    station     = `Meteorological.Weather.Station`,
+    temperature = VALUE
+  ) %>%
+  dplyr::filter(!is.na(temperature)) %>% # removig missing values
+  dplyr::mutate(
+    year  = as.integer(substr(month_code, 1, 4)),
+    month = as.integer(substr(month_code, 5, 6))
+  ) %>% # extracting year and month
+  dplyr::filter(year >= 2016, year <= 2023) %>% 
+  dplyr::select(station, year, month, mean_temp_celsius = temperature)
+
+cat("Temperature data rows:", nrow(temp_clean), "\n")
+cat("Stations in temperature data:\n")
+print(unique(temp_clean$station))
+```
+
+#### Joining rainfall and temperature - Weather data
+```{r message=FALSE, warning=FALSE}
+weather_all <- rainfall_clean %>%
+  dplyr::left_join(temp_clean, by = c("station", "year", "month")) # matching rows by station using left join, year and month so each row has both rainfall and temperature for that month
+
+write.csv(weather_all, "weather_all_stations_2016_2023.csv") # saving this 2016-2023 weather file. 
+
+weather_all <- read.csv("weather_all_stations_2016_2023.csv")
+
+cat("Combined weather rows:", nrow(weather_all), "\n")
+```
+
+#### Loading and cleaning the mammals data
+```{r message=FALSE, warning=FALSE}
+mammals_raw <- read.delim("MammalsOfIreland2016-2025.txt", sep = "\t", stringsAsFactors = FALSE)
+# mammals_raw is a tab separated file instead of comma separated, so i used tsv instead of csv. 
+mammals_clean <- mammals_raw %>%
+  dplyr::mutate(
+    date  = dmy(Date),
+    year  = year(date),
+    month = month(date)
+  ) %>% # converting "dmy" to proper dates
+  dplyr::filter(
+    year >= 2016,
+    year <= 2023,
+    tolower(as.character(ZeroAbundance)) != "true", 
+    !is.na(County),
+    !is.na(TaxonName)
+  ) %>% # keeping only sightings and rows where county and species name is available and years 2016-2023.
+  dplyr::rename(
+    species = TaxonName,
+    county  = County
+  ) %>%
+  dplyr::group_by(year, month, county, species) %>%
+  dplyr::summarise(
+    total_sightings = n(),
+    total_abundance = sum(as.numeric(Abundance), na.rm = TRUE),
+    .groups = "drop"
+  ) # grouping by year, month, county and species and counting the sightings in each group
+
+cat("Mammals cleaned. Rows:", nrow(mammals_clean), "\n")
+cat("Counties found:\n")
+print(sort(unique(mammals_clean$county)))
+```
+Note: 1. I had a with ZeroAbundance. I first wrote ZeroAbundance == "False" with quotes but it did not work because R stored it as TRUE/FALSE not as text so I changed it to ZeroAbundance == FALSE without quotes.
+
+2. There was some warnings about Abundance values that cannot be converted to numbers because some recorded as text like "several" instead of numbers. These will become NA and I will be using total_sightings later. 
+
+
+#### Map each county to its nearest weather station
+```{r message=FALSE, warning=FALSE}
+county_station_map <- tribble(
+  ~county,      ~station,
+  "Cork",       "Cork airport",
+  "Dublin",     "Dublin airport",
+  "Kildare",    "Dublin airport",
+  "Galway",     "Galway",
+  "Roscommon",  "Galway",
+  "Kerry",      "Valentia Observatory",
+  "Wexford",    "Rosslare",
+  "Clare",      "Shannon airport",
+  "Limerick",   "Shannon airport",
+  "Mayo",       "Claremorris",
+  "Wicklow",    "Casement",
+  "Carlow",     "Casement",
+  "Kilkenny",   "Kilkenny",
+  "Laois",      "Kilkenny",
+  "Tipperary",  "Kilkenny",
+  "Offaly",     "Birr",
+  "Westmeath",  "Mullingar",
+  "Louth",      "Dublin airport",
+  "Meath",      "Dublin airport",
+  "Monaghan",   "Clones",
+  "Donegal",    "Malin head",
+  "Sligo",      "Belmullet",
+  "Leitrim",    "Belmullet",
+  "Cavan",      "Clones"
+)
+
+cat("County-to-station map created for", nrow(county_station_map), "counties.\n")
+```
+Note: I have to match each county to its nearest weather station because mammals data is organised by county but weather data is organised by station. (I have matched it with the help of map of Ireland and internet. Some counties share same station because they are nearby). 
+
+#### Final merged dataset
+```{r message=FALSE, warning=FALSE}
+final_dataset <- mammals_clean %>%
+  dplyr::left_join(county_station_map, by = "county") %>% # joining mammals data with county-station  map to get station names
+  dplyr::left_join(weather_all, by = c("station", "year", "month")) %>% # joining weather data using station, year and month
+  dplyr::filter(
+    !is.na(rainfall_mm), 
+    !is.na(mean_temp_celsius)
+  ) # remove rows with missing weather data and also Northern Ireland counties, which have no weather stations
+
+cat("Final dataset rows:", nrow(final_dataset), "\n")
+cat("Stations covered:", length(unique(final_dataset$station)), "\n")
+cat("Counties covered:", length(unique(final_dataset$county)), "\n")
+cat("Species included:", length(unique(final_dataset$species)), "\n")
+
+write.csv(final_dataset, "final_dataset_expanded.csv")
+```
+
+#### Quick summary check
+```{r message=FALSE, warning=FALSE}
+cat("Year range:", min(final_dataset$year),
+    "to", max(final_dataset$year), "\n") # year range
+
+cat("Total sightings recorded:", sum(final_dataset$total_sightings), "\n") # total sightings 
+
+cat("\nTop 10 most sighted species:\n")
+final_dataset %>%
+  dplyr::group_by(species) %>%
+  dplyr::summarise(total = sum(total_sightings), .groups = "drop") %>%
+  dplyr::slice_max(total, n = 10) %>%
+  print() # top 10 recorded species
+
+cat("\nSightings per station zone:\n")
+
+final_dataset %>%
+  dplyr::group_by(station) %>%
+  dplyr::summarise(total = sum(total_sightings), .groups = "drop") %>%
+  dplyr::arrange(desc(total)) %>%
+  print() # Area's with most data - sightings per station
+```
+
+
+Note: I  had to write dplyr:: before each function because R was getting confused between dplyr and other packages that have functions with the same names like filter and select. 
+

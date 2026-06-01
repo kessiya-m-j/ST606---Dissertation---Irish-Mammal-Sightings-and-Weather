@@ -1,0 +1,785 @@
+---
+title: "ST606 Project - 7. Diagnostics"
+author: "Kessiya Mary Jose - 25250360"
+date: "`r format(Sys.time(), '%X %d %B, %Y')`"
+output: html_document
+---
+
+#### Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE,
+                      cache.path = "cache/")
+library(tidyverse)
+library(rjags)
+library(coda)
+library(parallel)
+library(patchwork)
+
+options(mc.cores = 6)
+```
+
+
+#### Load dataset and prepare species data
+```{r message=FALSE, warning=FALSE}
+# Loading the final dataset and preparing the three species datasets
+
+final_data <- read_csv("final_dataset_expanded2.csv",
+                       show_col_types = FALSE) %>%
+  dplyr::mutate(
+    date            = as.Date(paste(year, month, "01", sep = "-")),
+    temp_scaled     = as.numeric(scale(mean_temp)),
+    rainfall_scaled = as.numeric(scale(rainfall_mm)),
+    site            = as.integer(factor(station))
+  )
+
+fox_data <- final_data %>%
+  dplyr::filter(species == "Vulpes vulpes",
+                total_sightings >= 1)
+
+hare_data <- final_data %>%
+  dplyr::filter(species == "Lepus timidus subsp. hibernicus",
+                total_sightings >= 1)
+
+marten_data <- final_data %>%
+  dplyr::filter(species == "Martes martes",
+                total_sightings >= 1)
+
+cat("Fox rows:", nrow(fox_data), "\n")
+cat("Hare rows:", nrow(hare_data), "\n")
+cat("Marten rows:", nrow(marten_data), "\n")
+```
+
+
+#### Refit combined model for diagnostics
+```{r message=FALSE, warning=FALSE}
+# Refitting the combined model for all three species
+# We need the model objects in memory for diagnostic checks
+
+inits_combined <- list(
+  beta0 = 0, beta1 = 0,
+  beta2 = 0, beta3 = 0,
+  tau0  = 1, tau1  = 1, tau2 = 1
+)
+
+# Fox
+fox_diag_data <- list(
+  y        = fox_data$total_sightings,
+  temp     = fox_data$temp_scaled,
+  rainfall = fox_data$rainfall_scaled,
+  month    = fox_data$month,
+  site     = fox_data$site,
+  N        = nrow(fox_data),
+  S        = max(fox_data$site)
+)
+
+set.seed(123)
+fox_diag_model <- jags.model(
+  file     = "jags_model_combined.txt",
+  data     = fox_diag_data,
+  inits    = inits_combined,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+update(fox_diag_model, n.iter = 5000)
+fox_diag_samples <- coda.samples(
+  model          = fox_diag_model,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "alpha", "sigma0", "sigma1", "sigma2"),
+  n.iter         = 10000,
+  thin           = 2
+)
+cat("Fox model ready for diagnostics\n")
+
+# Hare
+hare_diag_data <- list(
+  y        = hare_data$total_sightings,
+  temp     = hare_data$temp_scaled,
+  rainfall = hare_data$rainfall_scaled,
+  month    = hare_data$month,
+  site     = hare_data$site,
+  N        = nrow(hare_data),
+  S        = max(hare_data$site)
+)
+
+set.seed(123)
+hare_diag_model <- jags.model(
+  file     = "jags_model_combined.txt",
+  data     = hare_diag_data,
+  inits    = inits_combined,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+update(hare_diag_model, n.iter = 8000)
+hare_diag_samples <- coda.samples(
+  model          = hare_diag_model,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "alpha", "sigma0", "sigma1", "sigma2"),
+  n.iter         = 15000,
+  thin           = 2
+)
+cat("Hare model ready for diagnostics\n")
+
+# Pine marten
+marten_diag_data <- list(
+  y        = marten_data$total_sightings,
+  temp     = marten_data$temp_scaled,
+  rainfall = marten_data$rainfall_scaled,
+  month    = marten_data$month,
+  site     = marten_data$site,
+  N        = nrow(marten_data),
+  S        = max(marten_data$site)
+)
+
+set.seed(123)
+marten_diag_model <- jags.model(
+  file     = "jags_model_combined.txt",
+  data     = marten_diag_data,
+  inits    = inits_combined,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+update(marten_diag_model, n.iter = 5000)
+marten_diag_samples <- coda.samples(
+  model          = marten_diag_model,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "alpha", "sigma0", "sigma1", "sigma2"),
+  n.iter         = 10000,
+  thin           = 2
+)
+cat("Pine marten model ready for diagnostics\n")
+```
+
+
+#### Prior-posterior overlap check
+```{r message=FALSE, warning=FALSE, fig.width=14, fig.height=8}
+# This checks whether the flat priors are influencing the posterior
+# If the posterior is very different from the prior, the data is driving the estimates 
+# If they overlap completely, the prior is too informative
+
+# I used flat normal priors: dnorm(0, 0.001)
+# which means mean=0, precision=0.001, so SD = sqrt(1/0.001) = 31.6
+# This is a very wide prior - almost flat
+
+# Generating prior samples for comparison
+set.seed(123)
+n_samples <- 15000
+prior_samples <- rnorm(n_samples, mean = 0, sd = sqrt(1/0.001))
+
+# Extracting posterior samples for beta0, beta1, beta2, beta3
+# for each species
+get_posterior <- function(samples, param) {
+  as.numeric(as.matrix(samples)[, param])
+}
+
+# Creating data for plotting
+prior_df <- data.frame(
+  value   = prior_samples,
+  type    = "Prior",
+  species = "All species"
+)
+
+# Fox posteriors
+fox_post <- data.frame(
+  rbind(
+    data.frame(value = get_posterior(fox_diag_samples, "beta0"),
+               parameter = "Intercept (β₀)"),
+    data.frame(value = get_posterior(fox_diag_samples, "beta1"),
+               parameter = "Temperature linear (β₁)"),
+    data.frame(value = get_posterior(fox_diag_samples, "beta2"),
+               parameter = "Temperature quadratic (β₂)"),
+    data.frame(value = get_posterior(fox_diag_samples, "beta3"),
+               parameter = "Rainfall (β₃)")
+  ),
+  species = "Vulpes vulpes (Fox)"
+)
+
+# Hare posteriors
+hare_post <- data.frame(
+  rbind(
+    data.frame(value = get_posterior(hare_diag_samples, "beta0"),
+               parameter = "Intercept (β₀)"),
+    data.frame(value = get_posterior(hare_diag_samples, "beta1"),
+               parameter = "Temperature linear (β₁)"),
+    data.frame(value = get_posterior(hare_diag_samples, "beta2"),
+               parameter = "Temperature quadratic (β₂)"),
+    data.frame(value = get_posterior(hare_diag_samples, "beta3"),
+               parameter = "Rainfall (β₃)")
+  ),
+  species = "Lepus timidus (Hare)"
+)
+
+# Marten posteriors
+marten_post <- data.frame(
+  rbind(
+    data.frame(value = get_posterior(marten_diag_samples, "beta0"),
+               parameter = "Intercept (β₀)"),
+    data.frame(value = get_posterior(marten_diag_samples, "beta1"),
+               parameter = "Temperature linear (β₁)"),
+    data.frame(value = get_posterior(marten_diag_samples, "beta2"),
+               parameter = "Temperature quadratic (β₂)"),
+    data.frame(value = get_posterior(marten_diag_samples, "beta3"),
+               parameter = "Rainfall (β₃)")
+  ),
+  species = "Martes martes (Pine marten)"
+)
+
+# Combining all posteriors
+all_post <- dplyr::bind_rows(fox_post, hare_post, marten_post)
+
+# Plotting prior vs posterior for each parameter and species
+ggplot(all_post, aes(x = value, fill = species, colour = species)) +
+  # Prior shown as dashed line
+  geom_density(data = data.frame(
+    value = prior_samples,
+    parameter = rep(c("Intercept (β₀)",
+                      "Temperature linear (β₁)",
+                      "Temperature quadratic (β₂)",
+                      "Rainfall (β₃)"),
+                    each = n_samples/4)),
+    aes(x = value), fill = NA,
+    colour = "black", linetype = "dashed",
+    linewidth = 0.8, inherit.aes = FALSE) +
+  # Posteriors shown as filled densities
+  geom_density(alpha = 0.3, linewidth = 0.8) +
+  facet_grid(species ~ parameter, scales = "free") +
+  coord_cartesian(xlim = c(-3, 3)) +
+  labs(
+    title    = "Prior-posterior overlap check",
+    subtitle = "Dashed line = prior distribution, filled = posterior. Good model: posterior clearly different from prior",
+    x        = "Parameter value",
+    y        = "Density"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+ggsave("plot_prior_posterior_overlap.png", width = 14, height = 8)
+cat("Saved: plot_prior_posterior_overlap.png\n")
+```
+
+
+#### Posterior predictive check
+```{r message=FALSE, warning=FALSE, fig.width=14, fig.height=6}
+# Function to simulate full datasets from the model
+run_ppc_density <- function(diag_model, observed_y,
+                             species_name, n_sim = 100) {
+  # Sampling mu values from the model
+  ppc_samples <- coda.samples(
+    model          = diag_model,
+    variable.names = "mu",
+    n.iter         = n_sim,
+    thin           = 1
+  )
+
+  mu_matrix <- as.matrix(ppc_samples)
+
+  # Simulating full datasets for each set of mu values
+  sim_datasets <- apply(mu_matrix, 1, function(mu_row) {
+    y_sim <- rpois(length(mu_row), lambda = mu_row)
+    y_sim[y_sim < 1] <- 1
+    y_sim
+  })
+
+  list(
+    observed     = observed_y,
+    sim_datasets = sim_datasets,
+    species      = species_name
+  )
+}
+
+cat("Running PPC density for fox...\n")
+fox_ppc_d    <- run_ppc_density(fox_diag_model,
+                                 fox_data$total_sightings,
+                                 "Vulpes vulpes (Fox)")
+
+cat("Running PPC density for hare...\n")
+hare_ppc_d   <- run_ppc_density(hare_diag_model,
+                                  hare_data$total_sightings,
+                                  "Lepus timidus (Hare)")
+
+cat("Running PPC density for pine marten...\n")
+marten_ppc_d <- run_ppc_density(marten_diag_model,
+                                  marten_data$total_sightings,
+                                  "Martes martes (Pine marten)")
+
+# Function to create density plot for one species
+plot_ppc_density <- function(ppc_result, colour) {
+  obs     <- ppc_result$observed
+  sim_mat <- ppc_result$sim_datasets
+  species <- ppc_result$species
+
+  # Using only 50 simulated lines so they are visible
+  n_show <- min(50, ncol(sim_mat))
+  idx    <- sample(1:ncol(sim_mat), n_show)
+
+  sim_df <- do.call(rbind, lapply(idx, function(i) {
+    d <- density(sim_mat[, i], from = 1, to = max(obs) + 2)
+    data.frame(x = d$x, y = d$y, sim = i)
+  }))
+
+  obs_d  <- density(obs, from = 1, to = max(obs) + 2)
+  obs_df <- data.frame(x = obs_d$x, y = obs_d$y)
+
+  ggplot() +
+    geom_line(data = sim_df,
+              aes(x = x, y = y, group = sim),
+              colour = colour, alpha = 0.25,
+              linewidth = 0.6) +
+    geom_line(data = obs_df,
+              aes(x = x, y = y),
+              colour = "black",
+              linewidth = 1.5) +
+    labs(title   = species,
+         x       = "Sightings",
+         y       = "Density") +
+    theme_minimal() +
+    theme(plot.title = element_text(face = "italic"))
+}
+
+p_fox    <- plot_ppc_density(fox_ppc_d,    "#2196F3")
+p_hare   <- plot_ppc_density(hare_ppc_d,   "#E53935")
+p_marten <- plot_ppc_density(marten_ppc_d, "#43A047")
+
+combined_ppc <- p_fox + p_hare + p_marten +
+  plot_annotation(
+    title    = "Posterior predictive check - density plot",
+    subtitle = "Black line = observed data. Coloured lines = simulated datasets from model.\nGood fit: black line sits within the bundle of coloured lines",
+    theme    = theme(
+      plot.title    = element_text(size = 14, face = "bold"),
+      plot.subtitle = element_text(size = 11)
+    )
+  )
+
+print(combined_ppc)
+ggsave("plot_ppc_density.png", combined_ppc, width = 14, height = 5)
+cat("Saved: plot_ppc_density.png\n")
+```
+
+
+#### Log-scale posterior predictive check
+```{r message=FALSE, warning=FALSE, fig.width=14, fig.height=6}
+# Redoing the PPC on log scale to better visualise the distribution shape
+# Log transformation spreads out the right-skewed sighting data making the density plots look more like the typical bell shape
+# This makes it easier to see whether the model captures the data distribution
+
+plot_ppc_density_log <- function(ppc_result, colour) {
+  obs     <- ppc_result$observed
+  sim_mat <- ppc_result$sim_datasets
+  species <- ppc_result$species
+
+  n_show <- min(50, ncol(sim_mat))
+  idx    <- sample(1:ncol(sim_mat), n_show)
+
+  sim_df <- do.call(rbind, lapply(idx, function(i) {
+    d <- density(log(sim_mat[, i] + 0.5))
+    data.frame(x = d$x, y = d$y, sim = i)
+  }))
+
+  obs_d  <- density(log(obs + 0.5))
+  obs_df <- data.frame(x = obs_d$x, y = obs_d$y)
+
+  ggplot() +
+    geom_line(data = sim_df,
+              aes(x = x, y = y, group = sim),
+              colour = colour, alpha = 0.3,
+              linewidth = 0.5) +
+    geom_line(data = obs_df,
+              aes(x = x, y = y),
+              colour = "black",
+              linewidth = 1.5) +
+    labs(title = species,
+         x     = "log(Sightings)",
+         y     = "Density") +
+    theme_minimal() +
+    theme(plot.title = element_text(face = "italic"))
+}
+
+p_fox_log    <- plot_ppc_density_log(fox_ppc_d,    "#2196F3")
+p_hare_log   <- plot_ppc_density_log(hare_ppc_d,   "#E53935")
+p_marten_log <- plot_ppc_density_log(marten_ppc_d, "#43A047")
+
+combined_ppc_log <- p_fox_log + p_hare_log + p_marten_log +
+  plot_annotation(
+    title    = "Posterior predictive check - log scale density plot",
+    subtitle = "Black line = observed data. Coloured lines = simulated datasets from model.\n Good fit: black line sits within the bundle of coloured lines",
+    theme    = theme(
+      plot.title    = element_text(size = 14, face = "bold"),
+      plot.subtitle = element_text(size = 11)
+    )
+  )
+
+print(combined_ppc_log)
+ggsave("plot_ppc_density_log.png", combined_ppc_log, width = 14, height = 5)
+cat("Saved: plot_ppc_density_log.png\n")
+```
+
+
+#### Fitted versus observed plot
+```{r message=FALSE, warning=FALSE, fig.width=14, fig.height=5}
+# shows how well the model predicted each individual observation
+# Points close to the diagonal line = good fit
+# Points far from diagonal = poor fit for those observations
+
+# Function to get fitted values for one species
+get_fitted <- function(diag_samples, species_data, species_name) {
+
+  # Getting posterior mean of mu for each observation
+  samples_matrix <- as.matrix(diag_samples)
+
+  # Finding columns that start with "mu["
+  mu_cols <- grep("^mu\\[", colnames(samples_matrix), value = TRUE)
+
+  if (length(mu_cols) == 0) {
+    cat("No mu columns found - need to refit with mu in variable.names\n")
+    return(NULL)
+  }
+
+  mu_means <- colMeans(samples_matrix[, mu_cols])
+
+  data.frame(
+    observed = species_data$total_sightings,
+    fitted   = mu_means,
+    species  = species_name
+  )
+}
+
+# need to refit sampling mu explicitly
+cat("Extracting fitted values for fox...\n")
+fox_mu_samples <- coda.samples(
+  model          = fox_diag_model,
+  variable.names = "mu",
+  n.iter         = 2000,
+  thin           = 1
+)
+
+cat("Extracting fitted values for hare...\n")
+hare_mu_samples <- coda.samples(
+  model          = hare_diag_model,
+  variable.names = "mu",
+  n.iter         = 2000,
+  thin           = 1
+)
+
+cat("Extracting fitted values for pine marten...\n")
+marten_mu_samples <- coda.samples(
+  model          = marten_diag_model,
+  variable.names = "mu",
+  n.iter         = 2000,
+  thin           = 1
+)
+
+# Getting posterior means of mu
+fox_fitted <- data.frame(
+  observed = fox_data$total_sightings,
+  fitted   = exp(colMeans(log(as.matrix(fox_mu_samples)))),
+  species  = "Vulpes vulpes (Fox)"
+)
+
+hare_fitted <- data.frame(
+  observed = hare_data$total_sightings,
+  fitted   = exp(colMeans(log(as.matrix(hare_mu_samples)))),
+  species  = "Lepus timidus (Hare)"
+)
+
+marten_fitted <- data.frame(
+  observed = marten_data$total_sightings,
+  fitted   = exp(colMeans(log(as.matrix(marten_mu_samples)))),
+  species  = "Martes martes (Pine marten)"
+)
+
+all_fitted <- dplyr::bind_rows(fox_fitted, hare_fitted, marten_fitted)
+
+# Plotting fitted vs observed
+ggplot(all_fitted, aes(x = fitted, y = observed)) +
+  geom_point(alpha = 0.3, colour = "#1565C0", size = 1.5) +
+  geom_abline(intercept = 0, slope = 1,
+              colour = "#E53935", linewidth = 1.0,
+              linetype = "dashed") +
+  facet_wrap(~species, scales = "free", ncol = 3) +
+  labs(
+    title    = "Fitted versus observed sightings",
+    subtitle = "Red dashed line = perfect fit. Points close to line = good prediction",
+    x        = "Fitted values (posterior mean of μ)",
+    y        = "Observed sightings"
+  ) +
+  theme_minimal()
+
+ggsave("plot_fitted_vs_observed.png", width = 14, height = 5)
+cat("Saved: plot_fitted_vs_observed.png\n")
+```
+
+
+#### Truncated negative binomial model - setup
+```{r message=FALSE, warning=FALSE}
+# Trying a truncated negative binomial model because the posterior predictive checks showed mild over-dispersion
+
+# The JAGS model code for truncated negative binomial
+jags_negbin_code <- "
+model {
+  for (i in 1:N) {
+    # Truncated negative binomial - minimum value is 1
+    y[i] ~ dnegbin(p[i], r) T(1,)
+    # Converting to the mean parameterisation
+    # mu = r * (1 - p) / p
+    # so p = r / (r + mu)
+    p[i] <- r / (r + mu[i])
+    log(mu[i]) <- (beta0 + b0[site[i]]) +
+                  (beta1 + b1[site[i]]) * temp[i] +
+                  (beta2 + b2[site[i]]) * temp[i]^2 +
+                  beta3 * rainfall[i] +
+                  alpha[month[i]]
+  }
+
+  # Random effects for each site
+  for (s in 1:S) {
+    b0[s] ~ dnorm(0, tau0)
+    b1[s] ~ dnorm(0, tau1)
+    b2[s] ~ dnorm(0, tau2)
+  }
+
+  # Monthly seasonal effects
+  alpha[1] <- 0
+  for (m in 2:12) {
+    alpha[m] ~ dnorm(0, 0.001)
+  }
+
+  # Fixed effect priors
+  beta0 ~ dnorm(0, 0.001)
+  beta1 ~ dnorm(0, 0.001)
+  beta2 ~ dnorm(0, 0.001)
+  beta3 ~ dnorm(0, 0.001)
+
+  # Overdispersion parameter
+  # r > 0, smaller r means more overdispersion
+  # r -> infinity means Poisson (no overdispersion)
+  r ~ dgamma(0.1, 0.1)
+
+  # Variance components
+  tau0 ~ dgamma(0.1, 0.1)
+  tau1 ~ dgamma(0.1, 0.1)
+  tau2 ~ dgamma(0.1, 0.1)
+
+  sigma0 <- 1 / sqrt(tau0)
+  sigma1 <- 1 / sqrt(tau1)
+  sigma2 <- 1 / sqrt(tau2)
+}
+"
+
+writeLines(jags_negbin_code, "jags_model_negbin.txt")
+cat("Negative binomial model code saved to jags_model_negbin.txt\n")
+```
+
+
+#### Truncated negative binomial - fox
+```{r message=FALSE, warning=FALSE}
+# Fitting the truncated negative binomial for fox
+
+inits_negbin <- list(
+  beta0 = 0, beta1 = 0,
+  beta2 = 0, beta3 = 0,
+  tau0  = 1, tau1  = 1, tau2 = 1,
+  r     = 1
+)
+
+fox_negbin_data <- list(
+  y        = fox_data$total_sightings,
+  temp     = fox_data$temp_scaled,
+  rainfall = fox_data$rainfall_scaled,
+  month    = fox_data$month,
+  site     = fox_data$site,
+  N        = nrow(fox_data),
+  S        = max(fox_data$site)
+)
+
+set.seed(123)
+
+fox_negbin_model <- jags.model(
+  file     = "jags_model_negbin.txt",
+  data     = fox_negbin_data,
+  inits    = inits_negbin,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+update(fox_negbin_model, n.iter = 5000)
+
+fox_negbin_samples <- coda.samples(
+  model          = fox_negbin_model,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "r", "sigma0", "sigma1", "sigma2"),
+  n.iter         = 10000,
+  thin           = 2
+)
+
+cat("Fox negative binomial model complete!\n")
+cat("\nConvergence check:\n")
+print(gelman.diag(fox_negbin_samples))
+cat("\nResults:\n")
+print(summary(fox_negbin_samples))
+```
+
+
+#### Truncated negative binomial - hare
+```{r message=FALSE, warning=FALSE}
+# Fitting the truncated negative binomial for hare
+
+hare_negbin_data <- list(
+  y        = hare_data$total_sightings,
+  temp     = hare_data$temp_scaled,
+  rainfall = hare_data$rainfall_scaled,
+  month    = hare_data$month,
+  site     = hare_data$site,
+  N        = nrow(hare_data),
+  S        = max(hare_data$site)
+)
+
+set.seed(123)
+
+hare_negbin_model <- jags.model(
+  file     = "jags_model_negbin.txt",
+  data     = hare_negbin_data,
+  inits    = inits_negbin,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+update(hare_negbin_model, n.iter = 8000)
+
+hare_negbin_samples <- coda.samples(
+  model          = hare_negbin_model,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "r", "sigma0", "sigma1", "sigma2"),
+  n.iter         = 15000,
+  thin           = 2
+)
+
+cat("Hare negative binomial model complete!\n")
+cat("\nConvergence check:\n")
+print(gelman.diag(hare_negbin_samples))
+cat("\nResults:\n")
+print(summary(hare_negbin_samples))
+```
+
+
+#### Truncated negative binomial - pine marten
+```{r message=FALSE, warning=FALSE}
+# Fitting the truncated negative binomial for pine marten
+
+marten_negbin_data <- list(
+  y        = marten_data$total_sightings,
+  temp     = marten_data$temp_scaled,
+  rainfall = marten_data$rainfall_scaled,
+  month    = marten_data$month,
+  site     = marten_data$site,
+  N        = nrow(marten_data),
+  S        = max(marten_data$site)
+)
+
+set.seed(123)
+
+marten_negbin_model <- jags.model(
+  file     = "jags_model_negbin.txt",
+  data     = marten_negbin_data,
+  inits    = inits_negbin,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+update(marten_negbin_model, n.iter = 5000)
+
+marten_negbin_samples <- coda.samples(
+  model          = marten_negbin_model,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "r", "sigma0", "sigma1", "sigma2"),
+  n.iter         = 10000,
+  thin           = 2
+)
+
+cat("Pine marten negative binomial model complete!\n")
+cat("\nConvergence check:\n")
+print(gelman.diag(marten_negbin_samples))
+cat("\nResults:\n")
+print(summary(marten_negbin_samples))
+```
+
+
+#### Negative binomial - to save results and compare with Poisson
+```{r message=FALSE, warning=FALSE}
+# Saving negative binomial results
+fox_negbin_sum    <- summary(fox_negbin_samples)
+hare_negbin_sum   <- summary(hare_negbin_samples)
+marten_negbin_sum <- summary(marten_negbin_samples)
+
+# Loading the Poisson results from the saved CSV file
+poisson_results <- read_csv("combined_model_coefficients.csv",
+                             show_col_types = FALSE)
+
+params_to_compare <- c("beta0", "beta1", "beta2", "beta3")
+
+# Extracting negbin results
+negbin_results <- dplyr::bind_rows(
+  data.frame(
+    species       = "Vulpes vulpes (Fox)",
+    parameter     = params_to_compare,
+    negbin_mean   = round(fox_negbin_sum$statistics[params_to_compare, "Mean"], 3),
+    negbin_lower  = round(fox_negbin_sum$quantiles[params_to_compare, "2.5%"], 3),
+    negbin_upper  = round(fox_negbin_sum$quantiles[params_to_compare, "97.5%"], 3)
+  ),
+  data.frame(
+    species       = "Lepus timidus (Hare)",
+    parameter     = params_to_compare,
+    negbin_mean   = round(hare_negbin_sum$statistics[params_to_compare, "Mean"], 3),
+    negbin_lower  = round(hare_negbin_sum$quantiles[params_to_compare, "2.5%"], 3),
+    negbin_upper  = round(hare_negbin_sum$quantiles[params_to_compare, "97.5%"], 3)
+  ),
+  data.frame(
+    species       = "Martes martes (Pine marten)",
+    parameter     = params_to_compare,
+    negbin_mean   = round(marten_negbin_sum$statistics[params_to_compare, "Mean"], 3),
+    negbin_lower  = round(marten_negbin_sum$quantiles[params_to_compare, "2.5%"], 3),
+    negbin_upper  = round(marten_negbin_sum$quantiles[params_to_compare, "97.5%"], 3)
+  )
+)
+
+# Joining with Poisson results
+poisson_clean <- poisson_results %>%
+  dplyr::filter(parameter %in% params_to_compare) %>%
+  dplyr::select(species, parameter,
+                poisson_mean  = posterior_mean,
+                poisson_lower = lower_95,
+                poisson_upper = upper_95)
+
+comparison_table <- poisson_clean %>%
+  dplyr::left_join(negbin_results,
+                   by = c("species", "parameter"))
+
+write_csv(comparison_table, "poisson_vs_negbin_comparison.csv")
+cat("Saved: poisson_vs_negbin_comparison.csv\n")
+
+cat("\nComparison table:\n")
+print(comparison_table)
+
+cat("\nOverdispersion r summary:\n")
+r_summary <- data.frame(
+  species   = c("Vulpes vulpes (Fox)",
+                "Lepus timidus (Hare)",
+                "Martes martes (Pine marten)"),
+  r_mean    = round(c(
+    fox_negbin_sum$statistics["r", "Mean"],
+    hare_negbin_sum$statistics["r", "Mean"],
+    marten_negbin_sum$statistics["r", "Mean"]), 3),
+  r_lower   = round(c(
+    fox_negbin_sum$quantiles["r", "2.5%"],
+    hare_negbin_sum$quantiles["r", "2.5%"],
+    marten_negbin_sum$quantiles["r", "2.5%"]), 3),
+  r_upper   = round(c(
+    fox_negbin_sum$quantiles["r", "97.5%"],
+    hare_negbin_sum$quantiles["r", "97.5%"],
+    marten_negbin_sum$quantiles["r", "97.5%"]), 3)
+)
+print(r_summary)
+write_csv(r_summary, "negbin_r_summary.csv")
+cat("Saved: negbin_r_summary.csv\n")
+```
+
+
+

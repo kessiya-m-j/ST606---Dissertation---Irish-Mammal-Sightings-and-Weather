@@ -1,0 +1,35 @@
+
+model {
+  # Likelihood
+  for (i in 1:N) {
+    y[i] ~ dpois(mu[i]) T(1,)
+    log(mu[i]) <- (beta0 + b0[site[i]]) +
+                  (beta1 + b1[site[i]]) * temp[i] +
+                  (beta2 + b2[site[i]]) * temp[i]^2 +
+                  beta3 * rainfall[i]
+  }
+
+  # Random effects for each site
+  for (s in 1:S) {
+    b0[s] ~ dnorm(0, tau0)
+    b1[s] ~ dnorm(0, tau1)
+    b2[s] ~ dnorm(0, tau2)
+  }
+
+  # Fixed effect priors
+  beta0 ~ dnorm(0, 0.001)
+  beta1 ~ dnorm(0, 0.001)
+  beta2 ~ dnorm(0, 0.001)
+  beta3 ~ dnorm(0, 0.001)
+
+  # Priors for variance of random effects
+  tau0 ~ dgamma(0.1, 0.1)
+  tau1 ~ dgamma(0.1, 0.1)
+  tau2 ~ dgamma(0.1, 0.1)
+
+  # Converting precision to standard deviation
+  sigma0 <- 1 / sqrt(tau0)
+  sigma1 <- 1 / sqrt(tau1)
+  sigma2 <- 1 / sqrt(tau2)
+}
+

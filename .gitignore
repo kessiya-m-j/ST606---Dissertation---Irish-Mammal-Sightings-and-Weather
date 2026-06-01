@@ -1,0 +1,8 @@
+cache/
+*.png
+final_dataset_expanded2.csv
+MammalsOfIreland2016-2025.txt
+MTM*.csv
+weather_*.csv
+*.Rhistory
+.Rdata

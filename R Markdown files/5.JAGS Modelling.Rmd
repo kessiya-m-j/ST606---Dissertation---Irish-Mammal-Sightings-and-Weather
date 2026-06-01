@@ -1,0 +1,1456 @@
+---
+title: "ST606 Project - 5. JAGS Modelling"
+author: "Kessiya Mary Jose - 25250360"
+date: "`r format(Sys.time(), '%X %d %B, %Y')`"
+output: html_document
+---
+
+#### Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE,
+                      cache.path = "cache/")
+library(tidyverse)
+library(rjags)
+library(coda)
+library(parallel)
+
+options(mc.cores = 6)
+```
+
+
+#### Loading dataset
+```{r message=FALSE, include=FALSE}
+final_data <- read.csv("final_dataset_expanded2.csv")
+
+cat("Dataset Rows:", nrow(final_data), "\n")
+cat("Columns:", names(final_data), "\n")
+```
+
+
+### Dataset preparation for fox, hare & marten species
+```{r message=FALSE, warning=FALSE}
+# converting sites to numeric site index
+final_data <- final_data %>%
+  dplyr::mutate(
+    site      = as.integer(factor(station)),
+    temp_scaled = as.numeric(scale(mean_temp))
+  )
+
+# checking the  number of sites
+cat("Number of sites:", max(final_data$site), "\n")
+cat("Site mapping:\n")
+final_data %>%
+  dplyr::select(station, site) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(site) %>%
+  print()
+
+# Creating 3 different dataset for each species
+fox_data <- final_data %>%
+  dplyr::filter(species == "Vulpes vulpes") %>%
+  dplyr::filter(total_sightings >= 1)
+
+hare_data <- final_data %>%
+  dplyr::filter(species == "Lepus timidus subsp. hibernicus") %>%
+  dplyr::filter(total_sightings >= 1)
+
+marten_data <- final_data %>%
+  dplyr::filter(species == "Martes martes") %>%
+  dplyr::filter(total_sightings >= 1)
+
+cat("Fox observations:", nrow(fox_data), "\n")
+cat("Hare observations:", nrow(hare_data), "\n")
+cat("Pine marten observations:", nrow(marten_data), "\n")
+```
+
+
+#### JAGS model code for fox (Vulpes vulpes)
+```{r message=FALSE, warning=FALSE}
+# The model has: - a truncated Poisson response (no zeros allowed) - a quadratic temperature effect (captures the parabola shape) - random intercept per site (each site has its own baseline) - random slope per site (each site responds differently to temperature) - random quadratic per site
+
+# I am writing the model as a text string first and then JAGS will read it & fit it to the data
+
+jags_model_code <- "
+model {
+  # Likelihood
+  for (i in 1:N) {
+    y[i] ~ dpois(mu[i]) T(1,)
+    log(mu[i]) <- (beta0 + b0[site[i]]) +
+                  (beta1 + b1[site[i]]) * temp[i] +
+                  (beta2 + b2[site[i]]) * temp[i]^2
+  }
+
+  # Random effects for each site
+  for (s in 1:S) {
+    b0[s] ~ dnorm(0, tau0)
+    b1[s] ~ dnorm(0, tau1)
+    b2[s] ~ dnorm(0, tau2)
+  }
+
+  # Fixed effect priors (flat normal = very wide, letting data decide)
+  beta0 ~ dnorm(0, 0.001)
+  beta1 ~ dnorm(0, 0.001)
+  beta2 ~ dnorm(0, 0.001)
+
+  # Priors for variance of random effects (half-t approximated as gamma)
+  tau0 ~ dgamma(0.1, 0.1)
+  tau1 ~ dgamma(0.1, 0.1)
+  tau2 ~ dgamma(0.1, 0.1)
+
+  # Converting precision to standard deviation for reporting
+  sigma0 <- 1 / sqrt(tau0)
+  sigma1 <- 1 / sqrt(tau1)
+  sigma2 <- 1 / sqrt(tau2)
+}
+"
+
+# Saving the model code to a text file for JAGS to read it
+writeLines(jags_model_code, "jags_model.txt")
+```
+
+
+#### Preparing fox data for JAGS
+```{r message=FALSE, warning=FALSE}
+# Since JAGS does not work with data frames it will need a list where each element is a vector or a number
+
+fox_jags_data <- list(
+  y    = fox_data$total_sightings,   # response variable
+  temp = fox_data$temp_scaled,        # scaled temperature predictor
+  site = fox_data$site,               # site index (1 to 9)
+  N    = nrow(fox_data),              # total number of observations
+  S    = max(fox_data$site)           # number of sites
+)
+
+cat("Fox data prepared for JAGS:\n")
+cat("N (observations):", fox_jags_data$N, "\n")
+cat("S (sites):", fox_jags_data$S, "\n")
+cat("Min sightings:", min(fox_jags_data$y), "\n")
+cat("Max sightings:", max(fox_jags_data$y), "\n")
+```
+
+
+#### Fitting the truncated Poisson model for fox in JAGS
+```{r message=FALSE, warning=FALSE}
+# Setting initial values to help JAGS start in a reasonable place
+inits <- list(
+  beta0 = 0,
+  beta1 = 0,
+  beta2 = 0,
+  tau0  = 1,
+  tau1  = 1,
+  tau2  = 1
+)
+
+# Setting a random seed for reproducible results
+set.seed(123)
+
+# Compiling the model
+fox_model <- jags.model(
+  file   = "jags_model.txt",
+  data   = fox_jags_data,
+  inits  = inits,
+  n.chains = 3,        # running 3 parallel chains for convergence checking
+  n.adapt  = 1000      # adaptation phase
+)
+
+cat("Model compiled successfully\n")
+```
+
+
+#### Running the MCMC sampler
+```{r message=FALSE, warning=FALSE}
+# Burn-in phase
+update(fox_model, n.iter = 2000)
+
+# Sampling phase - keeping these samples for inference
+fox_samples <- coda.samples(
+  model          = fox_model,
+  variable.names = c("beta0", "beta1", "beta2",
+                     "sigma0", "sigma1", "sigma2"),
+  n.iter         = 5000
+)
+
+cat("MCMC sampling complete\n")
+
+# Checking convergence using R-hat (Gelman-Rubin statistic)
+# R-hat close to 1.0 means the chains have converged
+# R-hat above 1.1 means convergence problems
+cat("\nConvergence check (R-hat values):\n")
+print(gelman.diag(fox_samples))
+
+# Summary of results
+cat("\nModel summary:\n")
+print(summary(fox_samples))
+```
+
+
+#### Saving fox model to csv file
+```{r message=FALSE, warning=FALSE}
+fox_summary <- summary(fox_samples)
+
+# Extracting the mean estimates and credible intervals
+fox_results <- data.frame(
+  parameter = rownames(fox_summary$statistics),
+  mean      = fox_summary$statistics[, "Mean"],
+  sd        = fox_summary$statistics[, "SD"],
+  lower_95  = fox_summary$quantiles[, "2.5%"],
+  upper_95  = fox_summary$quantiles[, "97.5%"]
+)
+
+print(fox_results)
+write.csv(fox_results, "fox_model_results.csv")
+```
+
+
+#### Plotting the predicted temperature effect for fox
+```{r message=FALSE, warning=FALSE}
+# I am creating a sequence of temperature values and then calculating the predicted mean sightings at each temperature
+
+# Getting the posterior mean estimates
+beta0_mean <- fox_results$mean[fox_results$parameter == "beta0"]
+beta1_mean <- fox_results$mean[fox_results$parameter == "beta1"]
+beta2_mean <- fox_results$mean[fox_results$parameter == "beta2"]
+
+# Creating a sequence of scaled temperatures to predict over
+temp_seq <- seq(min(fox_data$temp_scaled),
+                max(fox_data$temp_scaled),
+                length.out = 100)
+
+# Calculating predicted mean sightings on original scale
+predicted_mu <- exp(beta0_mean +
+                    beta1_mean * temp_seq +
+                    beta2_mean * temp_seq^2)
+
+# Converting scaled temperature back to Celsius for the x axis
+temp_mean_val <- mean(fox_data$mean_temp)
+temp_sd_val   <- sd(fox_data$mean_temp)
+temp_celsius  <- temp_seq * temp_sd_val + temp_mean_val
+
+# Creating the plot
+pred_df <- data.frame(
+  temperature = temp_celsius,
+  predicted   = predicted_mu
+)
+
+ggplot(pred_df, aes(x = temperature, y = predicted)) +
+  geom_line(colour = "#E53935", linewidth = 1.2) +
+  geom_rug(data = fox_data,
+           aes(x = mean_temp, y = NULL),
+           alpha = 0.3) +
+  labs(
+    title    = "Fox sightings - predicted temperature effect",
+    subtitle = "Truncated Poisson Bayesian model, posterior mean",
+    x        = "Mean monthly temperature (°C)",
+    y        = "Predicted mean sightings"
+  ) +
+  theme_minimal()
+
+ggsave("plot_fox_temperature_effect.png", width = 8, height = 5)
+```
+
+
+#### Fitting the truncated Poisson model for hare
+```{r message=FALSE, warning=FALSE}
+hare_jags_data <- list(
+  y    = hare_data$total_sightings,
+  temp = hare_data$temp_scaled,
+  site = hare_data$site,
+  N    = nrow(hare_data),
+  S    = max(hare_data$site)
+)
+
+cat("Hare data prepared for JAGS:\n")
+cat("N (observations):", hare_jags_data$N, "\n")
+cat("S (sites):", hare_jags_data$S, "\n")
+cat("Min sightings:", min(hare_jags_data$y), "\n")
+cat("Max sightings:", max(hare_jags_data$y), "\n")
+
+set.seed(123)
+
+hare_model <- jags.model(
+  file     = "jags_model.txt",
+  data     = hare_jags_data,
+  inits    = inits,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+cat("Hare model compiled\n")
+update(hare_model, n.iter = 2000)
+
+hare_samples <- coda.samples(
+  model          = hare_model,
+  variable.names = c("beta0", "beta1", "beta2",
+                     "sigma0", "sigma1", "sigma2"),
+  n.iter         = 5000
+)
+
+cat("Hare MCMC complete\n")
+cat("\nHare convergence check:\n")
+print(gelman.diag(hare_samples))
+cat("\nHare model summary:\n")
+print(summary(hare_samples))
+```
+
+
+#### Fitting the truncated Poisson model for pine marten
+```{r message=FALSE, warning=FALSE}
+marten_jags_data <- list(
+  y    = marten_data$total_sightings,
+  temp = marten_data$temp_scaled,
+  site = marten_data$site,
+  N    = nrow(marten_data),
+  S    = max(marten_data$site)
+)
+
+cat("Pine marten data prepared for JAGS:\n")
+cat("N (observations):", marten_jags_data$N, "\n")
+cat("S (sites):", marten_jags_data$S, "\n")
+cat("Min sightings:", min(marten_jags_data$y), "\n")
+cat("Max sightings:", max(marten_jags_data$y), "\n")
+
+set.seed(123)
+
+marten_model <- jags.model(
+  file     = "jags_model.txt",
+  data     = marten_jags_data,
+  inits    = inits,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+cat("Pine marten model compiled.\n")
+update(marten_model, n.iter = 2000)
+
+marten_samples <- coda.samples(
+  model          = marten_model,
+  variable.names = c("beta0", "beta1", "beta2",
+                     "sigma0", "sigma1", "sigma2"),
+  n.iter         = 5000
+)
+
+cat("Pine marten MCMC complete.\n")
+cat("\nPine marten convergence check:\n")
+print(gelman.diag(marten_samples))
+cat("\nPine marten model summary:\n")
+print(summary(marten_samples))
+```
+
+
+#### Fixing hare convergence
+```{r message=FALSE, warning=FALSE}
+# The hare model needs more iterations because beta0 R-hat is 1.24. So I am running 5000 more burn-in iterations and 10000 sampling iterations to help the chains converge properly
+
+update(hare_model, n.iter = 5000)
+
+hare_samples2 <- coda.samples(
+  model          = hare_model,
+  variable.names = c("beta0", "beta1", "beta2",
+                     "sigma0", "sigma1", "sigma2"),
+  n.iter         = 10000
+)
+
+cat("Extended hare MCMC complete!\n")
+cat("\nHare convergence check after extended run:\n")
+print(gelman.diag(hare_samples2))
+cat("\nHare model summary after extended run:\n")
+print(summary(hare_samples2))
+```
+
+
+#### Saving hare and martine's files
+```{r message=FALSE, warning=FALSE}
+# Hare - using the extended samples (hare_samples2)
+hare_summary <- summary(hare_samples2)
+hare_results <- data.frame(
+  parameter = rownames(hare_summary$statistics),
+  mean      = hare_summary$statistics[, "Mean"],
+  sd        = hare_summary$statistics[, "SD"],
+  lower_95  = hare_summary$quantiles[, "2.5%"],
+  upper_95  = hare_summary$quantiles[, "97.5%"]
+)
+write.csv(hare_results, "hare_model_results.csv")
+
+# Pine marten
+marten_summary <- summary(marten_samples)
+marten_results <- data.frame(
+  parameter = rownames(marten_summary$statistics),
+  mean      = marten_summary$statistics[, "Mean"],
+  sd        = marten_summary$statistics[, "SD"],
+  lower_95  = marten_summary$quantiles[, "2.5%"],
+  upper_95  = marten_summary$quantiles[, "97.5%"]
+)
+write.csv(marten_results, "marten_model_results.csv")
+
+print(hare_results)
+print(marten_results)
+```
+
+
+#### Combined prediction plot of three species with temperature effect
+```{r message=FALSE, warning=FALSE}
+# Function to calculate predictions for a species
+get_predictions <- function(results, species_data, species_name) {
+  b0 <- results$mean[results$parameter == "beta0"]
+  b1 <- results$mean[results$parameter == "beta1"]
+  b2 <- results$mean[results$parameter == "beta2"]
+
+  temp_seq <- seq(min(species_data$temp_scaled),
+                  max(species_data$temp_scaled),
+                  length.out = 100)
+
+  temp_mean_val <- mean(species_data$mean_temp)
+  temp_sd_val   <- sd(species_data$mean_temp)
+  temp_celsius  <- temp_seq * temp_sd_val + temp_mean_val
+
+  predicted <- exp(b0 + b1 * temp_seq + b2 * temp_seq^2)
+
+  data.frame(
+    temperature = temp_celsius,
+    predicted   = predicted,
+    species     = species_name
+  )
+}
+
+# Getting predictions for each species
+fox_pred    <- get_predictions(fox_results,    fox_data,    "Vulpes vulpes (Fox)")
+hare_pred   <- get_predictions(hare_results,   hare_data,   "Lepus timidus (Hare)")
+marten_pred <- get_predictions(marten_results, marten_data, "Martes martes (Pine marten)")
+
+# Combining into one data frame
+all_preds <- dplyr::bind_rows(fox_pred, hare_pred, marten_pred)
+
+# Plotting all three species together
+ggplot(all_preds, aes(x = temperature, y = predicted, colour = species)) +
+  geom_line(linewidth = 1.2) +
+  facet_wrap(~species, scales = "free_y", ncol = 3) +
+  labs(
+    title    = "Predicted temperature effect on sightings - all three species",
+    subtitle = "Truncated Poisson Bayesian mixed model, posterior mean",
+    x        = "Mean monthly temperature (°C)",
+    y        = "Predicted mean sightings"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+ggsave("plot_all_species_temperature.png", width = 14, height = 5)
+```
+
+
+#### Credible interval bands
+```{r message=FALSE, warning=FALSE}
+# By adding credible interval bands to the prediction plot instead of just the posterior mean line, i can show the 95% credible interval as a shaded band around each curve. This shows how uncertain the predictions are.
+
+# Function to get predictions with credible intervals using all MCMC samples rather than just the mean
+get_predictions_ci <- function(samples, species_data, species_name) {
+
+  # Converting samples to a matrix
+  samples_matrix <- as.matrix(samples)
+
+  # Getting all posterior samples for beta0, beta1, beta2
+  b0_samples <- samples_matrix[, "beta0"]
+  b1_samples <- samples_matrix[, "beta1"]
+  b2_samples <- samples_matrix[, "beta2"]
+
+  # Temperature sequence
+  temp_seq <- seq(min(species_data$temp_scaled),
+                  max(species_data$temp_scaled),
+                  length.out = 100)
+
+  # Converting back to Celsius
+  temp_mean_val <- mean(species_data$mean_temp)
+  temp_sd_val   <- sd(species_data$mean_temp)
+  temp_celsius  <- temp_seq * temp_sd_val + temp_mean_val
+
+  # Calculating predicted values for every MCMC sample, which gives a distribution of predictions at each temperature
+  pred_matrix <- sapply(temp_seq, function(t) {
+    exp(b0_samples + b1_samples * t + b2_samples * t^2)
+  })
+
+  # Summarising across all samples
+  data.frame(
+    temperature = temp_celsius,
+    predicted   = apply(pred_matrix, 2, median),
+    lower_95    = apply(pred_matrix, 2, quantile, probs = 0.025),
+    upper_95    = apply(pred_matrix, 2, quantile, probs = 0.975),
+    species     = species_name
+  )
+}
+
+# Getting predictions with credible intervals for each species
+fox_pred_ci    <- get_predictions_ci(fox_samples,    fox_data,
+                                     "Vulpes vulpes (Fox)")
+hare_pred_ci   <- get_predictions_ci(hare_samples2,  hare_data,
+                                     "Lepus timidus (Hare)")
+marten_pred_ci <- get_predictions_ci(marten_samples, marten_data,
+                                     "Martes martes (Pine marten)")
+
+# Combining all three
+all_preds_ci <- dplyr::bind_rows(fox_pred_ci, hare_pred_ci, marten_pred_ci)
+
+# Plotting with credible interval bands
+ggplot(all_preds_ci, aes(x = temperature)) +
+  geom_ribbon(aes(ymin = lower_95, ymax = upper_95, fill = species),
+              alpha = 0.2) +
+  geom_line(aes(y = predicted, colour = species), linewidth = 1.2) +
+  facet_wrap(~species, scales = "free_y", ncol = 3) +
+  labs(
+    title    = "Predicted temperature effect on sightings with 95% credible intervals",
+    subtitle = "Truncated Poisson Bayesian mixed model",
+    x        = "Mean monthly temperature (°C)",
+    y        = "Predicted mean sightings"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+ggsave("plot_all_species_temperature_ci.png", width = 14, height = 5)
+```
+
+
+#### Checking convergence of fox
+```{r message=FALSE, warning=FALSE, fig.width=12, fig.height=8}
+# Trace plots show how the MCMC chains moved through the parameter space. 
+# If the chains look like a "hairy caterpillar" mixing well, then it means good convergence
+# If chains are drifting or stuck that means poor convergence
+
+# Fox trace plots
+plot(fox_samples[, c("beta0", "beta1", "beta2",
+                     "sigma0", "sigma1", "sigma2")])
+```
+
+
+#Saving fox trace plots
+```{r message=FALSE, warning=FALSE, fig.width=12, fig.height=8}
+png("plot_fox_traces.png", width = 1400, height = 1800)
+par(mfrow = c(6, 2))
+plot(fox_samples[, c("beta0", "beta1", "beta2",
+                     "sigma0", "sigma1", "sigma2")])
+dev.off()
+```
+
+
+#### Checking convergence of hare
+```{r message=FALSE, warning=FALSE, fig.width=12, fig.height=8}
+# Hare trace plots
+plot(hare_samples2[, c("beta0", "beta1", "beta2",
+                       "sigma0", "sigma1", "sigma2")])
+```
+
+
+#Saving hare trace plots
+```{r message=FALSE, warning=FALSE, fig.width=12, fig.height=8}
+png("plot_hare_traces.png", width = 1400, height = 1800)
+par(mfrow = c(6, 2))
+plot(hare_samples2[, c("beta0", "beta1", "beta2",
+                       "sigma0", "sigma1", "sigma2")])
+dev.off()
+```
+
+
+#### Checking convergence of marten
+```{r message=FALSE, warning=FALSE,  fig.width=12, fig.height=8}
+# Pine marten trace plots
+plot(marten_samples[, c("beta0", "beta1", "beta2",
+                        "sigma0", "sigma1", "sigma2")])
+```
+
+
+#### Saving marten trace plots
+```{r message=FALSE, warning=FALSE, fig.width=12, fig.height=8}
+# Saving pine marten traces to file
+png("plot_marten_traces.png", width = 1400, height = 1800)
+par(mfrow = c(6, 2))
+plot(marten_samples[, c("beta0", "beta1", "beta2",
+                        "sigma0", "sigma1", "sigma2")])
+dev.off()
+```
+
+
+#### Creating datasets with and without 2019
+```{r message=FALSE, warning=FALSE}
+# Creating datasets without 2019
+fox_data_no2019 <- fox_data %>%
+  dplyr::filter(year != 2019)
+
+hare_data_no2019 <- hare_data %>%
+  dplyr::filter(year != 2019)
+
+marten_data_no2019 <- marten_data %>%
+  dplyr::filter(year != 2019)
+
+cat("Fox observations with 2019:", nrow(fox_data), "\n")
+cat("Fox observations without 2019:", nrow(fox_data_no2019), "\n")
+cat("\nHare observations with 2019:", nrow(hare_data), "\n")
+cat("Hare observations without 2019:", nrow(hare_data_no2019), "\n")
+cat("\nMarten observations with 2019:", nrow(marten_data), "\n")
+cat("Marten observations without 2019:", nrow(marten_data_no2019), "\n")
+```
+
+
+Key findings
+Fox: 0 sightings recorded in 2019
+Hare: 14
+Martin: 12
+
+
+
+#### Refitting hare model without 2019
+```{r message=FALSE, warning=FALSE}
+hare_jags_data_no2019 <- list(
+  y    = hare_data_no2019$total_sightings,
+  temp = hare_data_no2019$temp_scaled,
+  site = hare_data_no2019$site,
+  N    = nrow(hare_data_no2019),
+  S    = max(hare_data_no2019$site)
+)
+
+cat("Hare data without 2019 prepared:\n")
+cat("N:", hare_jags_data_no2019$N, "\n")
+
+set.seed(123)
+
+hare_model_no2019 <- jags.model(
+  file     = "jags_model.txt",
+  data     = hare_jags_data_no2019,
+  inits    = inits,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+update(hare_model_no2019, n.iter = 5000)
+
+hare_samples_no2019 <- coda.samples(
+  model          = hare_model_no2019,
+  variable.names = c("beta0", "beta1", "beta2",
+                     "sigma0", "sigma1", "sigma2"),
+  n.iter         = 10000
+)
+
+cat("Hare model without 2019 complete!\n")
+cat("\nConvergence check:\n")
+print(gelman.diag(hare_samples_no2019))
+cat("\nResults:\n")
+print(summary(hare_samples_no2019))
+```
+
+
+#### Refitting pine marten model without 2019 
+```{r message=FALSE, warning=FALSE}
+marten_jags_data_no2019 <- list(
+  y    = marten_data_no2019$total_sightings,
+  temp = marten_data_no2019$temp_scaled,
+  site = marten_data_no2019$site,
+  N    = nrow(marten_data_no2019),
+  S    = max(marten_data_no2019$site)
+)
+
+cat("Pine marten data without 2019 prepared:\n")
+cat("N:", marten_jags_data_no2019$N, "\n")
+
+set.seed(123)
+
+marten_model_no2019 <- jags.model(
+  file     = "jags_model.txt",
+  data     = marten_jags_data_no2019,
+  inits    = inits,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+update(marten_model_no2019, n.iter = 5000)
+
+marten_samples_no2019 <- coda.samples(
+  model          = marten_model_no2019,
+  variable.names = c("beta0", "beta1", "beta2",
+                     "sigma0", "sigma1", "sigma2"),
+  n.iter         = 10000
+)
+
+cat("Pine marten model without 2019 complete!\n")
+cat("\nConvergence check:\n")
+print(gelman.diag(marten_samples_no2019))
+cat("\nResults:\n")
+print(summary(marten_samples_no2019))
+```
+
+
+#### Comparing results with and without 2019
+```{r message=FALSE, warning=FALSE}
+# If the estimates are similar, the 2019 gap does not affect conclusions
+
+# Creating a comparison table
+comparison <- data.frame(
+  parameter = c("beta0", "beta1", "beta2"),
+  
+  # Hare with 2019
+  hare_with_mean    = c(1.1478, -0.2851, -0.3468),
+  hare_with_lower   = c(0.7638, -0.5900, -0.5718),
+  hare_with_upper   = c(1.5686, 0.0243, -0.1250),
+  
+  # Hare without 2019
+  hare_no2019_mean  = c(1.1492, -0.2875, -0.3943),
+  hare_no2019_lower = c(0.8275, -0.6100, -0.6435),
+  hare_no2019_upper = c(1.4643, -0.0217, -0.1549),
+  
+  # Marten with 2019
+  marten_with_mean    = c(0.7061, 0.4107, -0.2931),
+  marten_with_lower   = c(0.4295, 0.2154, -0.5928),
+  marten_with_upper   = c(0.9722, 0.6148, -0.0491),
+  
+  # Marten without 2019
+  marten_no2019_mean  = c(0.7235, 0.4147, -0.2782),
+  marten_no2019_lower = c(0.4139, 0.1980, -0.5739),
+  marten_no2019_upper = c(1.0066, 0.6426, -0.0120)
+)
+
+print(comparison)
+write.csv(comparison, "comparison_with_without_2019.csv")
+```
+
+
+#### Visual comparison plot
+```{r message=FALSE, warning=FALSE, fig.width=14, fig.height=6}
+# Hare predictions without 2019
+hare_no2019_summary <- summary(hare_samples_no2019)
+hare_no2019_results <- data.frame(
+  parameter = rownames(hare_no2019_summary$statistics),
+  mean      = hare_no2019_summary$statistics[, "Mean"],
+  sd        = hare_no2019_summary$statistics[, "SD"],
+  lower_95  = hare_no2019_summary$quantiles[, "2.5%"],
+  upper_95  = hare_no2019_summary$quantiles[, "97.5%"]
+)
+
+# Marten predictions without 2019
+marten_no2019_summary <- summary(marten_samples_no2019)
+marten_no2019_results <- data.frame(
+  parameter = rownames(marten_no2019_summary$statistics),
+  mean      = marten_no2019_summary$statistics[, "Mean"],
+  sd        = marten_no2019_summary$statistics[, "SD"],
+  lower_95  = marten_no2019_summary$quantiles[, "2.5%"],
+  upper_95  = marten_no2019_summary$quantiles[, "97.5%"]
+)
+
+# Getting predictions for both versions
+hare_pred_all    <- get_predictions(hare_results,
+                                    hare_data,
+                                    "Hare - all data")
+hare_pred_no2019 <- get_predictions(hare_no2019_results,
+                                    hare_data_no2019,
+                                    "Hare - excluding 2019")
+
+marten_pred_all    <- get_predictions(marten_results,
+                                      marten_data,
+                                      "Marten - all data")
+marten_pred_no2019 <- get_predictions(marten_no2019_results,
+                                      marten_data_no2019,
+                                      "Marten - excluding 2019")
+
+# Combining
+comparison_preds <- dplyr::bind_rows(
+  hare_pred_all, hare_pred_no2019,
+  marten_pred_all, marten_pred_no2019
+) %>%
+  dplyr::mutate(
+    animal   = ifelse(grepl("Hare", species), "Hare", "Pine marten"),
+    dataset  = ifelse(grepl("all data", species),
+                      "All data (including 2019)",
+                      "Excluding 2019")
+  )
+
+# Plotting comparison
+ggplot(comparison_preds,
+       aes(x = temperature, y = predicted,
+           colour = dataset, linetype = dataset)) +
+  geom_line(linewidth = 1.1) +
+  facet_wrap(~animal, scales = "free_y") +
+  scale_colour_manual(values = c("#E53935", "#1565C0")) +
+  labs(
+    title    = "Comparison of predictions with and without 2019 data",
+    subtitle = "Truncated Poisson Bayesian mixed model",
+    x        = "Mean monthly temperature (°C)",
+    y        = "Predicted mean sightings",
+    colour   = "Dataset",
+    linetype = "Dataset"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+ggsave("plot_comparison_2019.png", width = 12, height = 5)
+```
+
+
+#### Adding scaled rainfall to the species datasets
+```{r message=FALSE, warning=FALSE}
+final_data <- final_data %>%
+  dplyr::mutate(rainfall_scaled = as.numeric(scale(rainfall_mm)))
+
+# Recreating the three species datasets with the new scaled rainfall column
+fox_data <- final_data %>%
+  dplyr::filter(species == "Vulpes vulpes") %>%
+  dplyr::filter(total_sightings >= 1)
+
+hare_data <- final_data %>%
+  dplyr::filter(species == "Lepus timidus subsp. hibernicus") %>%
+  dplyr::filter(total_sightings >= 1)
+
+marten_data <- final_data %>%
+  dplyr::filter(species == "Martes martes") %>%
+  dplyr::filter(total_sightings >= 1)
+
+cat("Rainfall scaling is done.\n")
+cat("Mean scaled rainfall:", round(mean(final_data$rainfall_scaled), 4), "\n")
+cat("SD scaled rainfall:", round(sd(final_data$rainfall_scaled), 4), "\n")
+cat("Fox rows:", nrow(fox_data), "\n")
+cat("Hare rows:", nrow(hare_data), "\n")
+cat("Marten rows:", nrow(marten_data), "\n")
+```
+
+
+#### New JAGS model that includes both temperature and rainfall
+```{r message=FALSE, warning=FALSE}
+# Rainfall is added as a fixed effect only (no random slope per site)
+# beta3 is the rainfall effect
+
+jags_model_rainfall <- "
+model {
+  # Likelihood
+  for (i in 1:N) {
+    y[i] ~ dpois(mu[i]) T(1,)
+    log(mu[i]) <- (beta0 + b0[site[i]]) +
+                  (beta1 + b1[site[i]]) * temp[i] +
+                  (beta2 + b2[site[i]]) * temp[i]^2 +
+                  beta3 * rainfall[i]
+  }
+
+  # Random effects for each site
+  for (s in 1:S) {
+    b0[s] ~ dnorm(0, tau0)
+    b1[s] ~ dnorm(0, tau1)
+    b2[s] ~ dnorm(0, tau2)
+  }
+
+  # Fixed effect priors
+  beta0 ~ dnorm(0, 0.001)
+  beta1 ~ dnorm(0, 0.001)
+  beta2 ~ dnorm(0, 0.001)
+  beta3 ~ dnorm(0, 0.001)
+
+  # Priors for variance of random effects
+  tau0 ~ dgamma(0.1, 0.1)
+  tau1 ~ dgamma(0.1, 0.1)
+  tau2 ~ dgamma(0.1, 0.1)
+
+  # Converting precision to standard deviation
+  sigma0 <- 1 / sqrt(tau0)
+  sigma1 <- 1 / sqrt(tau1)
+  sigma2 <- 1 / sqrt(tau2)
+}
+"
+
+writeLines(jags_model_rainfall, "jags_model_rainfall.txt")
+cat("Rainfall model code is saved as jags_model_rainfall.txt\n")
+```
+
+
+#### Fitting the rainfall model for fox
+```{r message=FALSE, warning=FALSE}
+fox_jags_data_rain <- list(
+  y        = fox_data$total_sightings,
+  temp     = fox_data$temp_scaled,
+  rainfall = fox_data$rainfall_scaled,
+  site     = fox_data$site,
+  N        = nrow(fox_data),
+  S        = max(fox_data$site)
+)
+
+inits_rain <- list(
+  beta0 = 0, beta1 = 0,
+  beta2 = 0, beta3 = 0,
+  tau0  = 1, tau1  = 1, tau2 = 1
+)
+
+set.seed(123)
+
+fox_model_rain <- jags.model(
+  file     = "jags_model_rainfall.txt",
+  data     = fox_jags_data_rain,
+  inits    = inits_rain,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+update(fox_model_rain, n.iter = 2000)
+
+fox_samples_rain <- coda.samples(
+  model          = fox_model_rain,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "sigma0", "sigma1", "sigma2"),
+  n.iter         = 5000
+)
+
+cat("Fox rainfall model is complete\n")
+cat("\nConvergence check:\n")
+print(gelman.diag(fox_samples_rain))
+cat("\nResults:\n")
+print(summary(fox_samples_rain))
+```
+
+
+#### Fitting the rainfall model for hare
+
+```{r message=FALSE, warning=FALSE}
+hare_jags_data_rain <- list(
+  y        = hare_data$total_sightings,
+  temp     = hare_data$temp_scaled,
+  rainfall = hare_data$rainfall_scaled,
+  site     = hare_data$site,
+  N        = nrow(hare_data),
+  S        = max(hare_data$site)
+)
+
+set.seed(123)
+
+hare_model_rain <- jags.model(
+  file     = "jags_model_rainfall.txt",
+  data     = hare_jags_data_rain,
+  inits    = inits_rain,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+update(hare_model_rain, n.iter = 5000)
+
+hare_samples_rain <- coda.samples(
+  model          = hare_model_rain,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "sigma0", "sigma1", "sigma2"),
+  n.iter         = 10000
+)
+
+cat("Hare rainfall model is completed\n")
+cat("\nConvergence check:\n")
+print(gelman.diag(hare_samples_rain))
+cat("\nResults:\n")
+print(summary(hare_samples_rain))
+```
+
+
+#### Fitting the rainfall model for pine marten
+```{r message=FALSE, warning=FALSE}
+marten_jags_data_rain <- list(
+  y        = marten_data$total_sightings,
+  temp     = marten_data$temp_scaled,
+  rainfall = marten_data$rainfall_scaled,
+  site     = marten_data$site,
+  N        = nrow(marten_data),
+  S        = max(marten_data$site)
+)
+
+set.seed(123)
+
+marten_model_rain <- jags.model(
+  file     = "jags_model_rainfall.txt",
+  data     = marten_jags_data_rain,
+  inits    = inits_rain,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+update(marten_model_rain, n.iter = 2000)
+
+marten_samples_rain <- coda.samples(
+  model          = marten_model_rain,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "sigma0", "sigma1", "sigma2"),
+  n.iter         = 5000
+)
+
+cat("Pine marten rainfall model is completed!\n")
+cat("\nConvergence check:\n")
+print(gelman.diag(marten_samples_rain))
+cat("\nResults:\n")
+print(summary(marten_samples_rain))
+```
+
+
+#### Fox rainfall model - 2
+```{r message=FALSE, warning=FALSE}
+# Fox rainfall model needs more iterations because beta0 R-hat is 1.12 which is slightly above the 1.1 threshold
+
+cat("Running extended MCMC for fox rainfall model...\n")
+
+update(fox_model_rain, n.iter = 5000)
+
+fox_samples_rain2 <- coda.samples(
+  model          = fox_model_rain,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "sigma0", "sigma1", "sigma2"),
+  n.iter         = 10000
+)
+
+cat("Extended fox rainfall MCMC is completed\n")
+cat("\nConvergence check after extended run:\n")
+print(gelman.diag(fox_samples_rain2))
+cat("\nResults:\n")
+print(summary(fox_samples_rain2))
+```
+
+
+#### Saving rainfall model results for all three species
+```{r message=FALSE, warning=FALSE}
+fox_rain_summary <- summary(fox_samples_rain2)
+fox_rain_results <- data.frame(
+  parameter = rownames(fox_rain_summary$statistics),
+  mean      = fox_rain_summary$statistics[, "Mean"],
+  sd        = fox_rain_summary$statistics[, "SD"],
+  lower_95  = fox_rain_summary$quantiles[, "2.5%"],
+  upper_95  = fox_rain_summary$quantiles[, "97.5%"]
+)
+write.csv(fox_rain_results, "fox_rainfall_model_results.csv")
+
+hare_rain_summary <- summary(hare_samples_rain)
+hare_rain_results <- data.frame(
+  parameter = rownames(hare_rain_summary$statistics),
+  mean      = hare_rain_summary$statistics[, "Mean"],
+  sd        = hare_rain_summary$statistics[, "SD"],
+  lower_95  = hare_rain_summary$quantiles[, "2.5%"],
+  upper_95  = hare_rain_summary$quantiles[, "97.5%"]
+)
+write.csv(hare_rain_results, "hare_rainfall_model_results.csv")
+
+marten_rain_summary <- summary(marten_samples_rain)
+marten_rain_results <- data.frame(
+  parameter = rownames(marten_rain_summary$statistics),
+  mean      = marten_rain_summary$statistics[, "Mean"],
+  sd        = marten_rain_summary$statistics[, "SD"],
+  lower_95  = marten_rain_summary$quantiles[, "2.5%"],
+  upper_95  = marten_rain_summary$quantiles[, "97.5%"]
+)
+write.csv(marten_rain_results, "marten_rainfall_model_results.csv")
+
+# Printing beta3 (rainfall effect) for each species
+cat("\n----- Rainfall effect (beta3) summary -----\n")
+cat("\nFox beta3:\n")
+print(fox_rain_results[fox_rain_results$parameter == "beta3", ])
+cat("\nHare beta3:\n")
+print(hare_rain_results[hare_rain_results$parameter == "beta3", ])
+cat("\nMarten beta3:\n")
+print(marten_rain_results[marten_rain_results$parameter == "beta3", ])
+```
+
+
+#### Rainfall effect plot for all three species
+```{r message=FALSE, warning=FALSE, fig.width=14, fig.height=5}
+# Creating a rainfall plot to show how sightings change with rainfall by holding temperature at its mean (scaled value = 0)
+
+# Function to get rainfall predictions
+get_rainfall_predictions <- function(results, species_data, species_name) {
+  b0 <- results$mean[results$parameter == "beta0"]
+  b1 <- results$mean[results$parameter == "beta1"]
+  b2 <- results$mean[results$parameter == "beta2"]
+  b3 <- results$mean[results$parameter == "beta3"]
+
+  # rainfall sequence
+  rain_seq <- seq(min(species_data$rainfall_scaled),
+                  max(species_data$rainfall_scaled),
+                  length.out = 100)
+
+  # converting back to mm
+  rain_mean_val <- mean(species_data$rainfall_mm)
+  rain_sd_val   <- sd(species_data$rainfall_mm)
+  rain_mm       <- rain_seq * rain_sd_val + rain_mean_val
+
+  # predicting at mean temperature (scaled = 0)
+  predicted <- exp(b0 + b1 * 0 + b2 * 0 + b3 * rain_seq)
+
+  data.frame(
+    rainfall  = rain_mm,
+    predicted = predicted,
+    species   = species_name
+  )
+}
+
+fox_rain_pred    <- get_rainfall_predictions(
+  fox_rain_results, fox_data, "Vulpes vulpes (Fox)")
+hare_rain_pred   <- get_rainfall_predictions(
+  hare_rain_results, hare_data, "Lepus timidus (Hare)")
+marten_rain_pred <- get_rainfall_predictions(
+  marten_rain_results, marten_data, "Martes martes (Pine marten)")
+
+all_rain_preds <- dplyr::bind_rows(
+  fox_rain_pred, hare_rain_pred, marten_rain_pred)
+
+ggplot(all_rain_preds, aes(x = rainfall, y = predicted,
+                            colour = species)) +
+  geom_line(linewidth = 1.2) +
+  facet_wrap(~species, scales = "free_y", ncol = 3) +
+  labs(
+    title    = "Predicted rainfall effect on sightings - all three species",
+    subtitle = "Temperature held at mean value",
+    x        = "Monthly rainfall (mm)",
+    y        = "Predicted mean sightings"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+ggsave("plot_all_species_rainfall.png", width = 14, height = 5)
+```
+
+
+------------------------------------------------------------------------
+
+#### Seasonal effects - Adding month as a factor variable to the species datasets
+```{r message=FALSE, warning=FALSE}
+# I am using month as an integer (1-12) which JAGS will treat as a category January (month 1) will be the baseline reference month.
+# all other months get an effect relative to January
+
+# Checking the month distribution in each species dataset
+cat("Month distribution in fox data:\n")
+print(table(fox_data$month))
+
+cat("\nMonth distribution in hare data:\n")
+print(table(hare_data$month))
+
+cat("\nMonth distribution in marten data:\n")
+print(table(marten_data$month))
+```
+
+
+#### JAGS model with temperature, rainfall and seasonal effects
+```{r message=FALSE, warning=FALSE}
+# Month is included as a categorical predictor
+# alpha[month] gives a separate effect for each of the 12 months
+# alpha[1] (January) is set to zero as the reference or baseline
+# all other months are estimated relative to January
+
+jags_model_seasonal <- "
+model {
+  # Likelihood
+  for (i in 1:N) {
+    y[i] ~ dpois(mu[i]) T(1,)
+    log(mu[i]) <- (beta0 + b0[site[i]]) +
+                  (beta1 + b1[site[i]]) * temp[i] +
+                  (beta2 + b2[site[i]]) * temp[i]^2 +
+                  beta3 * rainfall[i] +
+                  alpha[month[i]]
+  }
+
+  # Random effects for each site
+  for (s in 1:S) {
+    b0[s] ~ dnorm(0, tau0)
+    b1[s] ~ dnorm(0, tau1)
+    b2[s] ~ dnorm(0, tau2)
+  }
+
+  # Monthly seasonal effects
+  # January (month 1) is fixed at 0 as the reference month
+  alpha[1] <- 0
+  for (m in 2:12) {
+    alpha[m] ~ dnorm(0, 0.001)
+  }
+
+  # Fixed effect priors
+  beta0 ~ dnorm(0, 0.001)
+  beta1 ~ dnorm(0, 0.001)
+  beta2 ~ dnorm(0, 0.001)
+  beta3 ~ dnorm(0, 0.001)
+
+  # Priors for variance of random effects
+  tau0 ~ dgamma(0.1, 0.1)
+  tau1 ~ dgamma(0.1, 0.1)
+  tau2 ~ dgamma(0.1, 0.1)
+
+  # Converting precision to standard deviation
+  sigma0 <- 1 / sqrt(tau0)
+  sigma1 <- 1 / sqrt(tau1)
+  sigma2 <- 1 / sqrt(tau2)
+}
+"
+
+writeLines(jags_model_seasonal, "jags_model_seasonal.txt")
+```
+
+
+#### Seasonal model for fox
+```{r message=FALSE, warning=FALSE}
+# This model includes temperature + rainfall + monthly seasonal effects
+
+fox_jags_data_seasonal <- list(
+  y        = fox_data$total_sightings,
+  temp     = fox_data$temp_scaled,
+  rainfall = fox_data$rainfall_scaled,
+  month    = fox_data$month,
+  site     = fox_data$site,
+  N        = nrow(fox_data),
+  S        = max(fox_data$site)
+)
+
+inits_seasonal <- list(
+  beta0 = 0, beta1 = 0,
+  beta2 = 0, beta3 = 0,
+  tau0  = 1, tau1  = 1, tau2 = 1
+)
+
+set.seed(123)
+
+fox_model_seasonal <- jags.model(
+  file     = "jags_model_seasonal.txt",
+  data     = fox_jags_data_seasonal,
+  inits    = inits_seasonal,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+update(fox_model_seasonal, n.iter = 5000)
+
+fox_samples_seasonal <- coda.samples(
+  model          = fox_model_seasonal,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "alpha", "sigma0", "sigma1", "sigma2"),
+  n.iter         = 10000
+)
+
+cat("Fox seasonal model completed\n")
+cat("Fox seasonal model convergence check:\n")
+print(gelman.diag(fox_samples_seasonal[, c("beta0", "beta1",
+                                            "beta2", "beta3",
+                                            "sigma0", "sigma1",
+                                            "sigma2")]))
+
+cat("\nFox seasonal model summary (main parameters):\n")
+fox_seasonal_summary <- summary(fox_samples_seasonal)
+print(fox_seasonal_summary$statistics[
+  c("beta0", "beta1", "beta2", "beta3",
+    "sigma0", "sigma1", "sigma2"), ])
+```
+
+
+#### Seasonal model for hare
+```{r message=FALSE, warning=FALSE}
+hare_jags_data_seasonal <- list(
+  y        = hare_data$total_sightings,
+  temp     = hare_data$temp_scaled,
+  rainfall = hare_data$rainfall_scaled,
+  month    = hare_data$month,
+  site     = hare_data$site,
+  N        = nrow(hare_data),
+  S        = max(hare_data$site)
+)
+
+set.seed(123)
+
+hare_model_seasonal <- jags.model(
+  file     = "jags_model_seasonal.txt",
+  data     = hare_jags_data_seasonal,
+  inits    = inits_seasonal,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+update(hare_model_seasonal, n.iter = 5000)
+
+hare_samples_seasonal <- coda.samples(
+  model          = hare_model_seasonal,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "alpha", "sigma0", "sigma1", "sigma2"),
+  n.iter         = 10000
+)
+
+cat("Hare seasonal model is completed\n")
+cat("\nConvergence check:\n")
+print(gelman.diag(hare_samples_seasonal[, c("beta0", "beta1",
+                                             "beta2", "beta3",
+                                             "sigma0", "sigma1",
+                                             "sigma2")]))
+
+cat("\nHare main parameters:\n")
+hare_seasonal_summary <- summary(hare_samples_seasonal)
+print(hare_seasonal_summary$statistics[
+  c("beta0", "beta1", "beta2", "beta3",
+    "sigma0", "sigma1", "sigma2"), ])
+```
+
+
+
+#### Seasonal model for pine marten
+```{r message=FALSE, warning=FALSE}
+marten_jags_data_seasonal <- list(
+  y        = marten_data$total_sightings,
+  temp     = marten_data$temp_scaled,
+  rainfall = marten_data$rainfall_scaled,
+  month    = marten_data$month,
+  site     = marten_data$site,
+  N        = nrow(marten_data),
+  S        = max(marten_data$site)
+)
+
+set.seed(123)
+
+marten_model_seasonal <- jags.model(
+  file     = "jags_model_seasonal.txt",
+  data     = marten_jags_data_seasonal,
+  inits    = inits_seasonal,
+  n.chains = 3,
+  n.adapt  = 1000
+)
+
+update(marten_model_seasonal, n.iter = 5000)
+
+marten_samples_seasonal <- coda.samples(
+  model          = marten_model_seasonal,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "alpha", "sigma0", "sigma1", "sigma2"),
+  n.iter         = 10000
+)
+
+cat("Pine marten seasonal model is completed\n")
+cat("\nConvergence check:\n")
+print(gelman.diag(marten_samples_seasonal[, c("beta0", "beta1",
+                                               "beta2", "beta3",
+                                               "sigma0", "sigma1",
+                                               "sigma2")]))
+
+cat("\nMarten main parameters:\n")
+marten_seasonal_summary <- summary(marten_samples_seasonal)
+print(marten_seasonal_summary$statistics[
+  c("beta0", "beta1", "beta2", "beta3",
+    "sigma0", "sigma1", "sigma2"), ])
+```
+
+
+#### Extended MCMC for hare seasonal model
+```{r message=FALSE, warning=FALSE}
+# Hare seasonal model needs more iterations - beta0 R-hat is 1.19
+cat("Running extended MCMC for hare seasonal model...\n")
+
+update(hare_model_seasonal, n.iter = 5000)
+
+hare_samples_seasonal2 <- coda.samples(
+  model          = hare_model_seasonal,
+  variable.names = c("beta0", "beta1", "beta2", "beta3",
+                     "alpha", "sigma0", "sigma1", "sigma2"),
+  n.iter         = 10000
+)
+
+cat("Extended hare seasonal MCMC complete!\n")
+cat("\nConvergence check:\n")
+print(gelman.diag(hare_samples_seasonal2[, c("beta0", "beta1",
+                                              "beta2", "beta3",
+                                              "sigma0", "sigma1",
+                                              "sigma2")]))
+cat("\nHare seasonal main parameters:\n")
+hare_seasonal_summary2 <- summary(hare_samples_seasonal2)
+print(hare_seasonal_summary2$statistics[
+  c("beta0", "beta1", "beta2", "beta3",
+    "sigma0", "sigma1", "sigma2"), ])
+```
+
+
+#### Seasonal effects plot
+```{r message=FALSE, warning=FALSE, fig.width=14, fig.height=6}
+# Extracting the monthly alpha effects for each species
+# alpha[1] = 0 (January baseline)
+# alpha[2] to alpha[12] show how each month differs from January
+
+# Function to extract monthly effects
+get_monthly_effects <- function(samples_summary, species_name) {
+  # Getting alpha parameters
+  alpha_names <- paste0("alpha[", 1:12, "]")
+  alpha_means <- samples_summary$statistics[alpha_names, "Mean"]
+  alpha_lower <- samples_summary$quantiles[alpha_names, "2.5%"]
+  alpha_upper <- samples_summary$quantiles[alpha_names, "97.5%"]
+
+  data.frame(
+    month   = 1:12,
+    month_name = factor(month.abb, levels = month.abb),
+    effect  = alpha_means,
+    lower   = alpha_lower,
+    upper   = alpha_upper,
+    species = species_name
+  )
+}
+
+# Getting summaries for all three species
+fox_seasonal_sum    <- summary(fox_samples_seasonal)
+hare_seasonal_sum   <- summary(hare_samples_seasonal2)
+marten_seasonal_sum <- summary(marten_samples_seasonal)
+
+# Extracting monthly effects
+fox_monthly    <- get_monthly_effects(fox_seasonal_sum,
+                                      "Vulpes vulpes (Fox)")
+hare_monthly   <- get_monthly_effects(hare_seasonal_sum,
+                                      "Lepus timidus (Hare)")
+marten_monthly <- get_monthly_effects(marten_seasonal_sum,
+                                      "Martes martes (Pine marten)")
+
+# Combining
+all_monthly <- dplyr::bind_rows(fox_monthly, hare_monthly, marten_monthly)
+
+# Plotting monthly effects with credible intervals
+ggplot(all_monthly, aes(x = month_name, y = effect,
+                         group = species, colour = species)) +
+  geom_hline(yintercept = 0, linetype = "dashed",
+             colour = "grey50", linewidth = 0.8) +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = species),
+              alpha = 0.2) +
+  geom_line(linewidth = 1.0) +
+  geom_point(size = 2) +
+  facet_wrap(~species, ncol = 3) +
+  labs(
+    title    = "Monthly seasonal effects on sightings - all three species",
+    subtitle = "Relative to January baseline (dashed line = no seasonal effect)",
+    x        = "Month",
+    y        = "Seasonal effect (log scale)"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    legend.position  = "none",
+    axis.text.x      = element_text(angle = 45, hjust = 1)
+  )
+
+ggsave("plot_seasonal_effects.png", width = 14, height = 6,dpi = 200)
+
+```
+
+
+#### Saving seasonal model results for all three species
+```{r message=FALSE, warning=FALSE}
+# Fox
+fox_seasonal_results <- data.frame(
+  parameter = rownames(fox_seasonal_sum$statistics),
+  mean      = fox_seasonal_sum$statistics[, "Mean"],
+  sd        = fox_seasonal_sum$statistics[, "SD"],
+  lower_95  = fox_seasonal_sum$quantiles[, "2.5%"],
+  upper_95  = fox_seasonal_sum$quantiles[, "97.5%"]
+)
+write.csv(fox_seasonal_results, "fox_seasonal_model_results.csv")
+
+# Hare
+hare_seasonal_results <- data.frame(
+  parameter = rownames(hare_seasonal_sum$statistics),
+  mean      = hare_seasonal_sum$statistics[, "Mean"],
+  sd        = hare_seasonal_sum$statistics[, "SD"],
+  lower_95  = hare_seasonal_sum$quantiles[, "2.5%"],
+  upper_95  = hare_seasonal_sum$quantiles[, "97.5%"]
+)
+write.csv(hare_seasonal_results, "hare_seasonal_model_results.csv")
+
+# Pine marten
+marten_seasonal_results <- data.frame(
+  parameter = rownames(marten_seasonal_sum$statistics),
+  mean      = marten_seasonal_sum$statistics[, "Mean"],
+  sd        = marten_seasonal_sum$statistics[, "SD"],
+  lower_95  = marten_seasonal_sum$quantiles[, "2.5%"],
+  upper_95  = marten_seasonal_sum$quantiles[, "97.5%"]
+)
+write.csv(marten_seasonal_results, "marten_seasonal_model_results.csv")
+
+cat("All seasonal model results saved!\n")
+cat("\nFiles saved:\n")
+cat("- fox_seasonal_model_results.csv\n")
+cat("- hare_seasonal_model_results.csv\n")
+cat("- marten_seasonal_model_results.csv\n")
+```
+
+
+

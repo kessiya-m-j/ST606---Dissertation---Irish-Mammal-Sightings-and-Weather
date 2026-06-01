@@ -1,0 +1,226 @@
+---
+title: "ST606 Project - Data Cleaning & Preparation"
+author: "Student Name: Kessiya Mary Jose, Student ID: 25250360"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Project Topic: Do Weather Conditions Affect Wildlife Sightings in Ireland?
+
+### Supervisor: Prof. Rafael de Andrade Moral
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE,
+                      cache.path = "cache/")
+```
+
+```{r include=FALSE}
+library(tidyverse)
+```
+
+
+#### Loading the Rainfall data
+```{r message=FALSE, warning=FALSE}
+rainfall <- read.csv("MTM01.20260317141732.csv")
+head(rainfall)
+```
+
+#### Cleaning the Rainfall data (2016-2022)
+```{r message=FALSE, warning=FALSE}
+clean_rainfall <- rainfall %>%
+  rename(
+    statistic_type = Statistic.Label,
+    month_code     = TLIST.M1.,
+    station        = Meteorological.Weather.Station,
+    value          = VALUE
+  ) %>%
+  filter(statistic_type == "Total Rainfall") %>%
+  filter(station %in% c("Dublin airport", "Casement")) %>%
+  mutate(
+    year  = as.integer(substr(as.character(month_code), 1, 4)),
+    month = as.integer(substr(as.character(month_code), 5, 6))
+  ) %>%
+  filter(year >= 2016 & year <= 2022) %>%
+  mutate(station = case_when(
+    station == "Dublin airport" ~ "Dublin Airport",
+    station == "Casement"       ~ "Casement Aerodrome",
+    TRUE ~ station
+  )) %>%
+  select(station, year, month, rainfall_mm = value) %>%
+  filter(!is.na(rainfall_mm))
+
+head(clean_rainfall)
+
+```
+
+
+#### Loading the Temperature data 
+```{r message=FALSE, warning=FALSE}
+temperature <- read.csv("MTM02.20260317141807.csv")
+head(temperature)
+```
+
+
+#### Cleaning the Temperature data (2016-2022)
+```{r message=FALSE, warning=FALSE}
+clean_temperature <- temperature %>%
+  rename(
+    statistic_type = Statistic.Label,
+    month_code     = TLIST.M1.,
+    station        = Meteorological.Weather.Station,
+    value          = VALUE
+  ) %>%
+  filter(statistic_type == "Mean Temperature") %>%
+  filter(station %in% c("Dublin airport", "Casement")) %>%
+  mutate(
+    year  = as.integer(substr(as.character(month_code), 1, 4)),
+    month = as.integer(substr(as.character(month_code), 5, 6))
+  ) %>%
+  filter(year >= 2016 & year <= 2022) %>%
+  mutate(station = case_when(
+    station == "Dublin airport" ~ "Dublin Airport",
+    station == "Casement"       ~ "Casement Aerodrome",
+    TRUE ~ station
+  )) %>%
+  select(station, year, month, mean_temp_celsius = value) %>%
+  filter(!is.na(mean_temp_celsius))
+
+head(clean_temperature)
+
+```
+
+
+#### Combining Rainfall and Temperature data (2016-2022)
+```{r message=FALSE, warning=FALSE}
+weather_2016_2022 <- clean_rainfall %>% 
+inner_join(clean_temperature, by = c("station", "year", "month"))
+
+head(weather_2016_2022)
+
+```
+
+#### Loading weather data (2023-2025)
+```{r message=FALSE, warning=FALSE}
+weather_2023_2025 <- read.csv("weather_2stations_2023_2025.csv")
+head(weather_2023_2025)
+```
+
+##### Note: Since the weather data is unavilable in the file from years 2023 onwards, I took these data directly from the website for Dublin Port and Casement Aerodrome stations.
+
+
+#### Cleaning weather data (2023-2025)
+```{r message=FALSE, warning=FALSE}
+weather_2023_2025 <- weather_2023_2025 %>%
+  filter(year >= 2023 & year <= 2025) %>%
+  select(station, year, month, rainfall_mm, mean_temp_celsius)
+
+head(weather_2023_2025)
+
+```
+
+
+#### Combining weather data from 2016-2022 & 2023-2024 
+```{r message=FALSE, warning=FALSE}
+weather <- bind_rows(weather_2016_2022, weather_2023_2025) %>%
+  arrange(station, year, month) %>% 
+  filter(year <= 2023)
+
+head(weather)
+tail(weather)
+
+```
+
+##### Note: Since the Mammals data is unavilable from 2024 June onwards, I decided prepare the data from 2016 January to 2023 December.
+
+
+#### Loading Mammals data
+```{r message=FALSE, warning=FALSE}
+mammals <- read.delim("MammalsOfIreland2016-2025.txt",
+                           sep = "\t",
+                           stringsAsFactors = FALSE)
+
+head(mammals)
+
+```
+
+
+#### Cleaning Mammals data
+```{r message=FALSE, warning=FALSE}
+clean_mammals <- mammals %>%
+  select(
+    date      = Date,
+    species   = TaxonName,
+    county    = County,
+    abundance = Abundance
+  ) %>%
+  mutate(date = as.Date(date, format = "%d/%m/%Y")) %>%
+  mutate(
+    year  = as.integer(format(date, "%Y")),
+    month = as.integer(format(date, "%m"))
+  ) %>%
+  filter(year >= 2016 & year <= 2023) %>%
+  filter(county %in% c("Dublin", "Kildare", "Wicklow",
+                        "Meath", "Carlow", "Wexford")) %>%
+  mutate(abundance = as.numeric(abundance)) %>%
+  mutate(abundance = ifelse(is.na(abundance), 1, abundance)) %>%
+  filter(county != "" & !is.na(county))
+
+head(clean_mammals)
+
+table(clean_mammals$county)
+
+```
+
+
+#### Monthly count of mammals
+```{r message=FALSE, warning=FALSE}
+mammals_monthly <- clean_mammals %>%
+  group_by(year, month, county, species) %>%
+  summarise(
+    total_sightings = n(),
+    total_abundance = sum(abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+head(mammals_monthly)
+
+```
+
+
+#### Assigning weather stations to county
+```{r message=FALSE, warning=FALSE}
+mammals_monthly <- mammals_monthly %>%
+  mutate(station = case_when(
+    county %in% c("Dublin", "Wicklow", "Meath")   ~ "Dublin Airport",
+    county %in% c("Kildare", "Carlow", "Wexford") ~ "Casement Aerodrome",
+    TRUE ~ NA_character_
+  ))
+
+head(mammals_monthly)
+
+```
+
+
+#### Merging all data (Weather and Mammals)
+```{r message=FALSE, warning=FALSE}
+merged_dataset <- mammals_monthly %>%
+  left_join(weather, by = c("station", "year", "month")) %>%
+  filter(!is.na(rainfall_mm))
+
+head(merged_dataset)
+
+summary(merged_dataset)
+```
+
+
+#### Saving all files
+```{r}
+write.csv(weather, "weather_final_2016_2023.csv", row.names = FALSE)
+
+write.csv(mammals_monthly, "mammals_monthly_summary.csv", row.names = FALSE)
+
+write.csv(merged_dataset, "final_merged_dataset.csv",    row.names = FALSE)
+
+```
+

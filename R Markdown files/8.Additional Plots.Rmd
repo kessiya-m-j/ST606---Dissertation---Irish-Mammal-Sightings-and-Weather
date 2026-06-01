@@ -1,0 +1,351 @@
+---
+title: "ST606 Project - 8. Additional Plots"
+author: "Kessiya Mary Jose - 25250360"
+date: "`r format(Sys.time(), '%X %d %B, %Y')`"
+output: html_document
+---
+
+#### Setup
+```{r setup, message=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE,
+                      cache.path = "cache/")
+library(tidyverse)
+library(rjags)
+library(coda)
+library(parallel)
+library(plotly)
+
+options(mc.cores = 6)
+```
+
+#### Load dataset and prepare species data
+```{r message=FALSE, warning=FALSE}
+final_data <- read_csv("final_dataset_expanded2.csv",
+                       show_col_types = FALSE) %>%
+  dplyr::mutate(
+    date            = as.Date(paste(year, month, "01", sep = "-")),
+    temp_scaled     = as.numeric(scale(mean_temp)),
+    rainfall_scaled = as.numeric(scale(rainfall_mm)),
+    site            = as.integer(factor(station))
+  )
+
+fox_data <- final_data %>%
+  dplyr::filter(species == "Vulpes vulpes",
+                total_sightings >= 1)
+
+hare_data <- final_data %>%
+  dplyr::filter(species == "Lepus timidus subsp. hibernicus",
+                total_sightings >= 1)
+
+marten_data <- final_data %>%
+  dplyr::filter(species == "Martes martes",
+                total_sightings >= 1)
+
+# Loading saved model coefficients
+combined_results <- read_csv("combined_model_coefficients.csv",
+                             show_col_types = FALSE)
+
+cat("Data loaded successfully\n")
+cat("Fox rows:", nrow(fox_data), "\n")
+cat("Hare rows:", nrow(hare_data), "\n")
+cat("Marten rows:", nrow(marten_data), "\n")
+```
+
+
+#### Plot 1 - Predicted sightings vs temperature with observed data
+```{r message=FALSE, warning=FALSE, fig.width=14, fig.height=6}
+# This plot shows the model's predicted temperature curve
+# with the actual observed data points overlaid on top
+# This shows how well the model captures the temperature pattern
+
+# Function to get predictions along temperature range
+get_temp_predictions <- function(species_name, species_data) {
+
+  # Getting coefficients for this species
+  coefs <- combined_results %>%
+    dplyr::filter(species == species_name)
+
+  b0 <- coefs$posterior_mean[coefs$parameter == "beta0"]
+  b1 <- coefs$posterior_mean[coefs$parameter == "beta1"]
+  b2 <- coefs$posterior_mean[coefs$parameter == "beta2"]
+
+  # Temperature sequence
+  temp_seq <- seq(min(species_data$temp_scaled),
+                  max(species_data$temp_scaled),
+                  length.out = 200)
+
+  # Converting back to Celsius
+  temp_mean_val <- mean(species_data$mean_temp)
+  temp_sd_val   <- sd(species_data$mean_temp)
+  temp_celsius  <- temp_seq * temp_sd_val + temp_mean_val
+
+  # Predicted at mean rainfall and average seasonal effect
+  predicted <- exp(b0 + b1 * temp_seq + b2 * temp_seq^2)
+
+  data.frame(
+    temperature = temp_celsius,
+    predicted   = predicted,
+    species     = species_name
+  )
+}
+
+# Getting predictions
+fox_temp_pred    <- get_temp_predictions(
+  "Vulpes vulpes (Fox)", fox_data)
+hare_temp_pred   <- get_temp_predictions(
+  "Lepus timidus (Hare)", hare_data)
+marten_temp_pred <- get_temp_predictions(
+  "Martes martes (Pine marten)", marten_data)
+
+all_temp_preds <- dplyr::bind_rows(
+  fox_temp_pred, hare_temp_pred, marten_temp_pred)
+
+# Observed data for overlay
+observed_data <- dplyr::bind_rows(
+  fox_data    %>% dplyr::mutate(species = "Vulpes vulpes (Fox)"),
+  hare_data   %>% dplyr::mutate(species = "Lepus timidus (Hare)"),
+  marten_data %>% dplyr::mutate(species = "Martes martes (Pine marten)")
+)
+
+# Plotting
+ggplot() +
+  geom_point(data = observed_data,
+             aes(x = mean_temp, y = total_sightings),
+             alpha = 0.2, colour = "grey50", size = 1) +
+  geom_line(data = all_temp_preds,
+            aes(x = temperature, y = predicted, colour = species),
+            linewidth = 1.2) +
+  facet_wrap(~species, scales = "free_y", ncol = 3) +
+  labs(
+    title    = "Predicted sightings vs temperature with observed data",
+    subtitle = "Grey points = observed data, coloured line = model prediction",
+    x        = "Mean monthly temperature (°C)",
+    y        = "Sightings"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+ggsave("plot_predicted_vs_temp_observed.png", width = 14, height = 6)
+cat("Saved: plot_predicted_vs_temp_observed.png\n")
+```
+
+
+#### Plot 2 - Predicted sightings vs rainfall with observed data
+```{r message=FALSE, warning=FALSE, fig.width=14, fig.height=6}
+# Temperature held at mean value (scaled = 0)
+
+get_rain_predictions <- function(species_name, species_data) {
+
+  coefs <- combined_results %>%
+    dplyr::filter(species == species_name)
+
+  b0 <- coefs$posterior_mean[coefs$parameter == "beta0"]
+  b3 <- coefs$posterior_mean[coefs$parameter == "beta3"]
+
+  rain_seq <- seq(min(species_data$rainfall_scaled),
+                  max(species_data$rainfall_scaled),
+                  length.out = 200)
+
+  rain_mean_val <- mean(species_data$rainfall_mm)
+  rain_sd_val   <- sd(species_data$rainfall_mm)
+  rain_mm       <- rain_seq * rain_sd_val + rain_mean_val
+
+  # Temperature held at mean (scaled = 0), no seasonal effect
+  predicted <- exp(b0 + b3 * rain_seq)
+
+  data.frame(
+    rainfall  = rain_mm,
+    predicted = predicted,
+    species   = species_name
+  )
+}
+
+fox_rain_pred    <- get_rain_predictions(
+  "Vulpes vulpes (Fox)", fox_data)
+hare_rain_pred   <- get_rain_predictions(
+  "Lepus timidus (Hare)", hare_data)
+marten_rain_pred <- get_rain_predictions(
+  "Martes martes (Pine marten)", marten_data)
+
+all_rain_preds <- dplyr::bind_rows(
+  fox_rain_pred, hare_rain_pred, marten_rain_pred)
+
+ggplot() +
+  geom_point(data = observed_data,
+             aes(x = rainfall_mm, y = total_sightings),
+             alpha = 0.2, colour = "grey50", size = 1) +
+  geom_line(data = all_rain_preds,
+            aes(x = rainfall, y = predicted, colour = species),
+            linewidth = 1.2) +
+  facet_wrap(~species, scales = "free_y", ncol = 3) +
+  labs(
+    title    = "Predicted sightings vs rainfall with observed data",
+    subtitle = "Grey points = observed data, coloured line = model prediction",
+    x        = "Monthly rainfall (mm)",
+    y        = "Sightings"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+ggsave("plot_predicted_vs_rainfall_observed.png", width = 14, height = 6)
+cat("Saved: plot_predicted_vs_rainfall_observed.png\n")
+```
+
+
+#### Plot 3 - 3D predicted sightings vs temperature and rainfall
+```{r message=FALSE, warning=FALSE}
+# 3D plot showing predicted sightings as a surface
+# over both temperature and rainfall simultaneously
+
+# Function to create 3D surface predictions
+get_3d_predictions <- function(species_name, species_data) {
+
+  coefs <- combined_results %>%
+    dplyr::filter(species == species_name)
+
+  b0 <- coefs$posterior_mean[coefs$parameter == "beta0"]
+  b1 <- coefs$posterior_mean[coefs$parameter == "beta1"]
+  b2 <- coefs$posterior_mean[coefs$parameter == "beta2"]
+  b3 <- coefs$posterior_mean[coefs$parameter == "beta3"]
+
+  # Creating grid of temperature and rainfall values
+  temp_seq <- seq(min(species_data$temp_scaled),
+                  max(species_data$temp_scaled),
+                  length.out = 50)
+  rain_seq <- seq(min(species_data$rainfall_scaled),
+                  max(species_data$rainfall_scaled),
+                  length.out = 50)
+
+  # Converting back to original scale
+  temp_celsius <- temp_seq * sd(species_data$mean_temp) +
+                  mean(species_data$mean_temp)
+  rain_mm      <- rain_seq * sd(species_data$rainfall_mm) +
+                  mean(species_data$rainfall_mm)
+
+  # Creating prediction matrix
+  pred_matrix <- outer(temp_seq, rain_seq, function(t, r) {
+    exp(b0 + b1 * t + b2 * t^2 + b3 * r)
+  })
+
+  list(
+    temp_celsius = temp_celsius,
+    rain_mm      = rain_mm,
+    pred_matrix  = pred_matrix,
+    species      = species_name
+  )
+}
+
+# Getting 3D predictions for each species
+fox_3d    <- get_3d_predictions("Vulpes vulpes (Fox)", fox_data)
+hare_3d   <- get_3d_predictions("Lepus timidus (Hare)", hare_data)
+marten_3d <- get_3d_predictions(
+  "Martes martes (Pine marten)", marten_data)
+
+cat("3D predictions calculated for all species\n")
+```
+
+
+#### 3D plot - fox
+```{r message=FALSE, warning=FALSE}
+# Interactive 3D surface plot for fox
+
+plot_ly(
+  x = fox_3d$temp_celsius,
+  y = fox_3d$rain_mm,
+  z = fox_3d$pred_matrix,
+  type = "surface",
+  colorscale = "Blues",
+  showscale  = TRUE
+) %>%
+  layout(
+    title = "Fox - predicted sightings vs temperature and rainfall",
+    scene = list(
+      xaxis = list(title = "Temperature (°C)"),
+      yaxis = list(title = "Rainfall (mm)"),
+      zaxis = list(title = "Predicted sightings")
+    )
+  )
+```
+
+
+#### 3D plot - hare
+```{r message=FALSE, warning=FALSE}
+plot_ly(
+  x = hare_3d$temp_celsius,
+  y = hare_3d$rain_mm,
+  z = hare_3d$pred_matrix,
+  type = "surface",
+  colorscale = "Reds",
+  showscale  = TRUE
+) %>%
+  layout(
+    title = "Hare - predicted sightings vs temperature and rainfall",
+    scene = list(
+      xaxis = list(title = "Temperature (°C)"),
+      yaxis = list(title = "Rainfall (mm)"),
+      zaxis = list(title = "Predicted sightings")
+    )
+  )
+```
+
+
+#### 3D plot - pine marten
+```{r message=FALSE, warning=FALSE}
+plot_ly(
+  x = marten_3d$temp_celsius,
+  y = marten_3d$rain_mm,
+  z = marten_3d$pred_matrix,
+  type = "surface",
+  colorscale = "Greens",
+  showscale  = TRUE
+) %>%
+  layout(
+    title = "Pine marten - predicted sightings vs temperature and rainfall",
+    scene = list(
+      xaxis = list(title = "Temperature (°C)"),
+      yaxis = list(title = "Rainfall (mm)"),
+      zaxis = list(title = "Predicted sightings")
+    )
+  )
+```
+
+
+#### Plot 4 - Combined temperature and rainfall effects panel
+```{r message=FALSE, warning=FALSE, fig.width=14, fig.height=10}
+# Temperature effects data
+temp_effects <- all_temp_preds %>%
+  dplyr::mutate(predictor = "Temperature (°C)",
+                x_value   = temperature)
+
+# Rainfall effects data
+rain_effects <- all_rain_preds %>%
+  dplyr::mutate(predictor = "Rainfall (mm)",
+                x_value   = rainfall)
+
+# Renaming columns to match
+temp_plot_data <- temp_effects %>%
+  dplyr::select(x_value, predicted, species, predictor)
+
+rain_plot_data <- rain_effects %>%
+  dplyr::select(x_value, predicted, species, predictor)
+
+combined_effects <- dplyr::bind_rows(temp_plot_data, rain_plot_data)
+
+# Plotting
+ggplot(combined_effects,
+       aes(x = x_value, y = predicted, colour = species)) +
+  geom_line(linewidth = 1.2) +
+  facet_grid(species ~ predictor, scales = "free") +
+  labs(
+    title    = "Combined weather effects on mammal sightings",
+    subtitle = "Left: temperature effect (rainfall at mean). Right: rainfall effect (temperature at mean)",
+    x        = "Predictor value",
+    y        = "Predicted mean sightings"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+ggsave("plot_combined_weather_effects.png", width = 14, height = 10)
+cat("Saved: plot_combined_weather_effects.png\n")
+```
+
