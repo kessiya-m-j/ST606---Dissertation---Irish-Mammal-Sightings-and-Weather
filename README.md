@@ -64,6 +64,26 @@
 
 ##### 
 
+
+
+### \## Data
+
+
+
+
+
+##### Raw data files are not included in this repository.
+
+##### 
+
+##### \- \*\*Mammal sightings:\*\* Download from \[Biodiversity Ireland](https://maps.biodiversityireland.ie)
+
+##### \- \*\*Weather data:\*\* Download from \[CSO PxStat](https://data.cso.ie) — tables MTM05, MTM06, MTM07, MTM08
+
+
+
+### 
+
 ### \## Model
 
 ### 
