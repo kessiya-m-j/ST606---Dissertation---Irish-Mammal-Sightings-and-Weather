@@ -32,9 +32,13 @@
 
 ### \*\*Data sources:\*\*
 
+##### Raw data files are not included in this repository.
+
 ##### \- Biodiversity Ireland - Mammals of Ireland 2016–2025 (NBDC)
+##### \- \*\*Mammal sightings:\*\* Download from \[Biodiversity Ireland](https://maps.biodiversityireland.ie)
 
 ##### \- Met Éireann weather data via CSO PxStat
+##### \- \*\*Weather data:\*\* Download from \[CSO PxStat](https://data.cso.ie) - tables MTM05, MTM06, MTM07, MTM08
 
 ### 
 
@@ -63,24 +67,6 @@
 ##### | 8. Additional Plots.Rmd | 3D plots and additional visualisations |
 
 ##### 
-
-
-
-### \## Data
-
-
-
-
-
-##### Raw data files are not included in this repository.
-
-##### 
-
-##### \- \*\*Mammal sightings:\*\* Download from \[Biodiversity Ireland](https://maps.biodiversityireland.ie)
-
-##### \- \*\*Weather data:\*\* Download from \[CSO PxStat](https://data.cso.ie) — tables MTM05, MTM06, MTM07, MTM08
-
-
 
 ### 
 
